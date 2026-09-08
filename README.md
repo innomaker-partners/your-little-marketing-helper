@@ -58,7 +58,7 @@ The tools here are free, and they stay free. What we charge for is the work we d
 
 If you want to watch one of these tools used on a real problem before you try it yourself, we run live sessions that walk through them end to end. And if a tool gets you part of the way but you want a person in it with you, that is exactly what we do for a living.
 
-You can find both, and the rest of what we do, at **[innomakerpartners.com](https://innomakerpartners.com)**.
+You can find both, and the rest of what we do, at **[our website](https://www.innomakerpartners.com/consulting/do-more-with-less)**.
 
 ## License
 
