@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "meeting-intel",
+  "version": "1.0.0",
+  "description": "Research external meeting participants and produce intelligence briefs before your calls. Connects to your calendar, researches each external participant via web, and delivers a structured brief with company profiles, person backgrounds, confidence tags, and conversation starters.",
+  "author": {
+    "name": "InnoMaker Partners"
+  },
+  "license": "MIT",
+  "skills": [
+    "./skills"
+  ]
+}

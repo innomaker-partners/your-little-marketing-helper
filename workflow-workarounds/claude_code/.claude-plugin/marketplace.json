@@ -1,0 +1,14 @@
+{
+  "name": "workflow-workarounds-local",
+  "owner": { "name": "InnoMaker Partners" },
+  "metadata": {
+    "description": "Local single-plugin marketplace for the Workflow Workarounds plugin. Add this folder as a marketplace, then install workflow-workarounds from it."
+  },
+  "plugins": [
+    {
+      "name": "workflow-workarounds",
+      "source": "./",
+      "description": "Two general workarounds for platforms that block clean programmatic access: an authenticated API proxy through a Make.com webhook (for anything an account can reach behind OAuth), and a method for building deterministic browser automations for web workflows that have no usable API."
+    }
+  ]
+}

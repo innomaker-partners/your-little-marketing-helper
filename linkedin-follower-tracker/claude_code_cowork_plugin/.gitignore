@@ -1,0 +1,16 @@
+# Byte-compiled Python — never ship; useless/confusing on another Python version.
+__pycache__/
+*.py[cod]
+
+# Local run + secret artifacts, should a user ever run inside the install tree.
+# (Real runs write to the user's own subject directory, not here.)
+.env
+config.json
+taxonomy.json
+# Real follower data (PII) — the running history and dated exports. Never ship a
+# stranger's install carrying a real person's follower list, even if a run once
+# landed here by mistake.
+master.csv
+Followers*.csv
+
+.DS_Store

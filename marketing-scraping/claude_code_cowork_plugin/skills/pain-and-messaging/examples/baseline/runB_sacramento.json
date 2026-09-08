@@ -1,0 +1,12 @@
+{
+  "country_code": "us",
+  "country": "USA",
+  "city": "",
+  "vertical": "coffee shop",
+  "sources": ["maps"],
+  "maps_search_queries": ["coffee shop"],
+  "maps_location_query": "Sacramento, USA",
+  "review_target_count": 3,
+  "max_reviews_per_place": 20,
+  "budget_caps": {"phase1": 0.60}
+}

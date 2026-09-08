@@ -1,0 +1,359 @@
+{
+  "banned_words": [
+    {
+      "forms": [
+        "quietly",
+        "quiet"
+      ],
+      "original": "quietly / quiet (as texture)"
+    },
+    {
+      "forms": [
+        "genuine",
+        "genuinely"
+      ],
+      "original": "genuine / genuinely"
+    },
+    {
+      "forms": [
+        "juncture"
+      ],
+      "original": "juncture"
+    },
+    {
+      "forms": [
+        "cusp"
+      ],
+      "original": "cusp"
+    },
+    {
+      "forms": [
+        "hurdle"
+      ],
+      "original": "hurdle(s)"
+    },
+    {
+      "forms": [
+        "bustling"
+      ],
+      "original": "bustling"
+    },
+    {
+      "forms": [
+        "harnessing"
+      ],
+      "original": "harnessing"
+    },
+    {
+      "forms": [
+        "unveiling the power"
+      ],
+      "original": "unveiling the power"
+    },
+    {
+      "forms": [
+        "realm"
+      ],
+      "original": "realm"
+    },
+    {
+      "forms": [
+        "depicted"
+      ],
+      "original": "depicted"
+    },
+    {
+      "forms": [
+        "demystify"
+      ],
+      "original": "demystify (in copy)"
+    },
+    {
+      "forms": [
+        "insurmountable"
+      ],
+      "original": "insurmountable"
+    },
+    {
+      "forms": [
+        "new era"
+      ],
+      "original": "new era"
+    },
+    {
+      "forms": [
+        "poised"
+      ],
+      "original": "poised"
+    },
+    {
+      "forms": [
+        "unravel"
+      ],
+      "original": "unravel"
+    },
+    {
+      "forms": [
+        "entanglement"
+      ],
+      "original": "entanglement"
+    },
+    {
+      "forms": [
+        "unprecedented"
+      ],
+      "original": "unprecedented"
+    },
+    {
+      "forms": [
+        "beacon"
+      ],
+      "original": "beacon"
+    },
+    {
+      "forms": [
+        "unleash"
+      ],
+      "original": "unleash"
+    },
+    {
+      "forms": [
+        "enrich"
+      ],
+      "original": "enrich"
+    },
+    {
+      "forms": [
+        "multifaceted"
+      ],
+      "original": "multifaceted"
+    },
+    {
+      "forms": [
+        "elevate"
+      ],
+      "original": "elevate"
+    },
+    {
+      "forms": [
+        "discover"
+      ],
+      "original": "discover (as CTA)"
+    },
+    {
+      "forms": [
+        "supercharge"
+      ],
+      "original": "supercharge"
+    },
+    {
+      "forms": [
+        "unlock"
+      ],
+      "original": "unlock"
+    },
+    {
+      "forms": [
+        "tailored",
+        "tailor",
+        "tailoring"
+      ],
+      "original": "tailored / tailor / tailoring"
+    },
+    {
+      "forms": [
+        "elegant"
+      ],
+      "original": "elegant (as filler)"
+    },
+    {
+      "forms": [
+        "delve"
+      ],
+      "original": "delve"
+    },
+    {
+      "forms": [
+        "dive"
+      ],
+      "original": "dive (into)"
+    },
+    {
+      "forms": [
+        "ever-changing",
+        "ever-evolving"
+      ],
+      "original": "ever-changing / ever-evolving"
+    },
+    {
+      "forms": [
+        "meticulously"
+      ],
+      "original": "meticulously"
+    },
+    {
+      "forms": [
+        "grappling"
+      ],
+      "original": "grappling"
+    },
+    {
+      "forms": [
+        "weighing"
+      ],
+      "original": "weighing"
+    },
+    {
+      "forms": [
+        "architect"
+      ],
+      "original": "architect (as verb)"
+    },
+    {
+      "forms": [
+        "journey"
+      ],
+      "original": "journey"
+    },
+    {
+      "forms": [
+        "embark"
+      ],
+      "original": "embark"
+    },
+    {
+      "forms": [
+        "navigate"
+      ],
+      "original": "navigate (as filler)"
+    },
+    {
+      "forms": [
+        "dazzle"
+      ],
+      "original": "dazzle"
+    },
+    {
+      "forms": [
+        "tapestry"
+      ],
+      "original": "tapestry"
+    },
+    {
+      "forms": [
+        "transform",
+        "transformative"
+      ],
+      "original": "transform / transformative (as hype)"
+    },
+    {
+      "forms": [
+        "tackle"
+      ],
+      "original": "tackle"
+    },
+    {
+      "forms": [
+        "streamline"
+      ],
+      "original": "streamline"
+    },
+    {
+      "forms": [
+        "leverage",
+        "leveraging"
+      ],
+      "original": "leverage / leveraging"
+    },
+    {
+      "forms": [
+        "spot on"
+      ],
+      "original": "spot on"
+    },
+    {
+      "forms": [
+        "gamechanger",
+        "game-changing"
+      ],
+      "original": "gamechanger / game-changing"
+    },
+    {
+      "forms": [
+        "synergy"
+      ],
+      "original": "synergy"
+    },
+    {
+      "forms": [
+        "thrilled"
+      ],
+      "original": "thrilled"
+    },
+    {
+      "forms": [
+        "world of"
+      ],
+      "original": "world of"
+    },
+    {
+      "forms": [
+        "all the difference"
+      ],
+      "original": "all the difference"
+    },
+    {
+      "forms": [
+        "savvy"
+      ],
+      "original": "savvy"
+    },
+    {
+      "forms": [
+        "revolutionize"
+      ],
+      "original": "revolutionize"
+    },
+    {
+      "forms": [
+        "disrupt"
+      ],
+      "original": "disrupt (as hype)"
+    },
+    {
+      "forms": [
+        "AI-powered"
+      ],
+      "original": "AI-powered\" (as filler)"
+    },
+    {
+      "forms": [
+        "seamless",
+        "seamlessly"
+      ],
+      "original": "seamless / seamlessly"
+    },
+    {
+      "forms": [
+        "landscape"
+      ],
+      "original": "landscape (as filler)"
+    },
+    {
+      "forms": [
+        "fast-paced"
+      ],
+      "original": "fast-paced (as filler)"
+    },
+    {
+      "forms": [
+        "I hope this email finds you well"
+      ],
+      "original": "I hope this email finds you well"
+    }
+  ],
+  "dash_chars": [
+    "—",
+    "–"
+  ]
+}

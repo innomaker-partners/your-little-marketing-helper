@@ -1,0 +1,52 @@
+[
+  {
+    "fullName": "Ada Active",
+    "firstName": "Ada",
+    "lastName": "Active",
+    "occupation": "VP Marketing at Alpha Co",
+    "profileLink": "https://www.linkedin.com/in/ACoAAA_aaa",
+    "followers": 500,
+    "isFollowing": true,
+    "timestamp": "2026-08-31T08:00:00.000Z"
+  },
+  {
+    "fullName": "Cara Constant",
+    "firstName": "Cara",
+    "lastName": "Constant",
+    "occupation": "Student",
+    "profileLink": "https://www.linkedin.com/in/ACoAAA_ccc/",
+    "followers": 121,
+    "isFollowing": false,
+    "timestamp": "2026-08-31T08:00:00.000Z"
+  },
+  {
+    "fullName": "Dan Debut",
+    "firstName": "Dan",
+    "lastName": "Debut",
+    "occupation": "Head of Sales at Delta Co",
+    "profileLink": "https://www.linkedin.com/in/ACoAAA_ddd",
+    "followers": 9000,
+    "isFollowing": false,
+    "timestamp": "2026-08-31T08:00:00.000Z"
+  },
+  {
+    "fullName": "Eve Entry",
+    "firstName": "Eve",
+    "lastName": "Entry",
+    "occupation": "Analyst at Echo Co",
+    "profileLink": "https://www.linkedin.com/in/ACoAAA_eee/",
+    "followers": 40,
+    "isFollowing": false,
+    "timestamp": "2026-08-31T08:00:00.000Z"
+  },
+  {
+    "fullName": "Finn Fresh",
+    "firstName": "Finn",
+    "lastName": "Fresh",
+    "occupation": "Founder",
+    "profileLink": "https://www.linkedin.com/in/ACoAAA_fff",
+    "followers": 77,
+    "isFollowing": false,
+    "timestamp": "2026-08-31T08:00:00.000Z"
+  }
+]

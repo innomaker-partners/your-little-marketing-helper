@@ -1,0 +1,14 @@
+{
+  "name": "linkedin-follower-tracker-local",
+  "owner": { "name": "InnoMaker Partners" },
+  "metadata": {
+    "description": "Local single-plugin marketplace for the LinkedIn Follower Tracker plugin. Add this folder as a marketplace, then install linkedin-follower-tracker from it."
+  },
+  "plugins": [
+    {
+      "name": "linkedin-follower-tracker",
+      "source": "./",
+      "description": "Track LinkedIn follower growth, enrich with company data, classify by ICP segment, and send a push notification summary. You bring your own PhantomBuster account."
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "_cost_note": "This tool meters per keyword on YOUR own Apify account. A focused ~300-keyword run costs roughly $2 to $5 (more at 1,000+ keywords), which EXCEEDS Apify's free monthly credit, so a card is required. The forecast prints the exact estimate before spending. This tool is not free; it is cheap next to a $99 to $139 per month subscription.",
+  "_input_modes": "Provide EITHER seed_terms (mode 1: keywords you already know) OR a vertical (mode 2: a market label to expand from). Set location for a city-localized SERP; leave it blank for country-level.",
+
+  "country_code": "US",
+  "language": "en",
+
+  "seed_terms": ["project management software", "team task tracker"],
+  "vertical": "",
+  "location": "",
+  "geo_uule": "",
+
+  "keyword_cap": 300,
+  "serp_top_n": 100,
+  "opportunity_kd_max": 40,
+
+  "budget_caps": { "phase1": 6.0 },
+  "stages": []
+}

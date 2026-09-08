@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Secrets - never commit these
+.env
+.env.local
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# Local user config produced at runtime (tools write their own config.json)
+config/config.json
+
+# Editor / tooling
+.tokensave/
+.idea/
+.vscode/

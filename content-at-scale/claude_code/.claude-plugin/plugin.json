@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "content-at-scale",
+  "version": "1.0.0",
+  "description": "Produce content at scale with strict quality control: grouped runs, provenance-labelled context, deterministic gates, adversarial fact-checking.",
+  "author": {
+    "name": "InnoMaker Partners"
+  },
+  "license": "MIT",
+  "keywords": [
+    "content",
+    "content-at-scale",
+    "copywriting",
+    "provenance",
+    "fact-check",
+    "anti-slop",
+    "quality-gates"
+  ]
+}

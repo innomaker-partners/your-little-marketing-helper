@@ -1,0 +1,6 @@
+{
+  "_comment": "Example classifier taxonomy. Copy to taxonomy.json and edit. The code owns the OUTPUT contract (a single label); you own the labels and the rules. Always keep one catch-all in `labels` and name it in `fallback`.",
+  "instructions": "Classify each new follower into exactly one label, based on their company and role. Choose the closest fit; when the data is thin or ambiguous, use the fallback.",
+  "labels": ["Tech", "Insurance", "Manufacturing", "Marketing", "Other"],
+  "fallback": "Other"
+}

@@ -1,0 +1,103 @@
+{
+  "_comment": "Copy this file to PAIN_CONFIG.json and fill it in. This single file drives the entire tool. You bring your own Apify account (only credential needed) and your own LLM (Claude, Ollama, anything with a CLI). Worked example: national fitness gym chains, a review-rich, non-local-trade vertical that proves the tool generalizes beyond a single local business.",
+
+  "country_code": "us",
+  "country":      "USA",
+  "language":     "en",
+  "city":         "Chicago",
+  "vertical":     "fitness gym",
+
+  "_subject_input_comment": [
+    "Choose ONE input mode. All three converge on the same review corpus.",
+    "",
+    "MODE 1: You already have the exact Google Maps URLs for each competitor.",
+    "   Fastest; zero discovery cost; B2a is skipped entirely.",
+    "   Set competitor_place_urls to the Maps place URLs (find them by searching",
+    "   the business on Google Maps and copying the URL from the address bar).",
+    "   Leave competitor_names and maps_search_queries empty.",
+    "   Example:",
+    "     'competitor_place_urls': [",
+    "       'https://www.google.com/maps/place/Planet+Fitness/@41.88,-87.62,17z/data=...',",
+    "       'https://www.google.com/maps/place/Anytime+Fitness/@41.89,-87.63,17z/data=...'",
+    "     ]",
+    "",
+    "MODE 2: You know the names; the tool finds their Maps listings. (ACTIVE BELOW)",
+    "   B2a searches Maps for each name; the best-match selector picks one listing",
+    "   per name (skips aggregators like Yelp). Advisable to eyeball the resolved",
+    "   list before the paid B2b run. Leave competitor_place_urls empty.",
+    "",
+    "MODE 3: You want to discover the top businesses in a category.",
+    "   B2a searches by category+location; the tool ranks results by review count",
+    "   and queues the top review_target_count businesses for B2b.",
+    "   Leave competitor_place_urls and competitor_names empty.",
+    "   Example:",
+    "     'maps_search_queries': ['fitness gym chicago', 'gym membership chicago'],",
+    "     'vertical': 'fitness gym', 'city': 'Chicago'"
+  ],
+
+  "competitor_place_urls": [],
+
+  "_mode2_active": "MODE 2 is active: tool resolves these names to their Maps listings.",
+  "competitor_names": [
+    "Planet Fitness",
+    "Anytime Fitness",
+    "Crunch Fitness"
+  ],
+
+  "maps_search_queries": [],
+
+  "_maps_location_query_comment": "Single geocodable place, or '' to omit it and let the search strings carry geo. Absent => defaults to 'city, country'. For mode 2, adding a city to the search string already pins the location; locationQuery adds a second anchor for Maps' resolver.",
+  "maps_location_query": "Chicago, USA",
+
+  "_review_target_count_comment": "Mode 3 only: how many businesses (sorted by review count) to queue for review scraping. Mode 2 always keeps all named competitors regardless of this cap.",
+  "review_target_count": 10,
+
+  "_max_reviews_comment": "Maximum reviews to scrape per business. 100-200 gives a solid corpus for pain/trust mining; 20 is enough for a test run.",
+  "max_reviews_per_place": 100,
+
+  "_personal_data_comment": "false = pull review text + stars + business name only, NOT reviewer identities (names, profile URLs). Leave false: the pain/trust analysis needs the text, not who wrote it.",
+  "personal_data": false,
+
+  "_report_model_comment": "Model your local `claude` CLI uses to WRITE the E1/E2 reports. Leave blank for a capable default (sonnet). This step clusters the pre-counted findings and writes the analyst report, which is a judgment task, so do NOT set it to the cheapest model. Set a specific alias (e.g. 'opus') only if you want to override. The deterministic counting happens in code before this step, so the model never invents or counts. Note: report writing is not timed out. A capable model can take several minutes per report and that is normal, so the tool lets it finish rather than aborting on a clock.",
+  "report_model": "",
+
+  "_budget_caps_comment": "Hard spend ceiling per phase (USD). The forecast-before-spend gate prints the estimate before every Apify run. A 5-competitor, 100-reviews-each run costs roughly $0.50 on Maps alone; raise this only if you are scraping a large category set.",
+  "budget_caps": {
+    "phase1": 5.0
+  },
+
+  "_stages_comment": "Leave empty to run all defaults (B2a + B2b). Set to ['B2a'] or ['B2b'] to run only one stage -- useful for re-running after a partial failure.",
+  "stages": [],
+
+  "_sources_comment": [
+    "Which review sources to scrape into one combined corpus. Default is ['maps'].",
+    "An empty list is treated as ['maps']. Unknown source names cause a loud SystemExit",
+    "at startup, so a typo never silently produces an empty corpus.",
+    "Known values: maps, trustpilot, appstore, googleplay, reddit, g2, capterra.",
+    "To add a source: put its name here AND fill its subject key(s) below.",
+    "Example (Maps plus Trustpilot plus Reddit): set \"sources\": [\"maps\", \"trustpilot\", \"reddit\"]."
+  ],
+  "sources": ["maps"],
+
+  "_per_source_subjects_comment": [
+    "Subject keys per source. Fill the key for each source you list above; leave the rest empty.",
+    "  trustpilot -> trustpilot_domains: the domain Trustpilot lists the company under, e.g. 'company.com'",
+    "  appstore   -> appstore_names (just the app/company name, e.g. 'Spotify') AND/OR appstore_app_ids (numeric id '389801252' or App Store URL). Names are resolved to ids and supplied ids are validated for free via the iTunes API at the resolution gate; unresolved names/ids are surfaced, never silently skipped.",
+    "  googleplay -> googleplay_names (just the app/company name) AND/OR googleplay_app_ids (package 'com.company.app' or Google Play URL). Names are resolved to packages and supplied packages validated for free via the public Play store at the resolution gate.",
+    "  reddit     -> reddit_queries and/or reddit_subreddits and/or reddit_urls (see the reddit note)",
+    "  g2         -> g2_names (product name, resolved to a G2 slug via a small paid discover run at the gate) AND/OR g2_urls (a G2 product URL or bare slug, format-validated free)",
+    "  capterra   -> capterra_urls: a Capterra product URL of the form /p/<id>/<slug>/"
+  ],
+  "trustpilot_domains":   [],
+  "appstore_names":       [],
+  "appstore_app_ids":     [],
+  "googleplay_names":     [],
+  "googleplay_app_ids":   [],
+  "reddit_queries":       [],
+  "reddit_subreddits":    [],
+  "reddit_urls":          [],
+  "_reddit_note": "Reddit has no star ratings. The tool infers pain vs praise from the language of each post and comment (not from upvotes, which measure agreement, not sentiment), sets genuinely neutral discussion aside, and labels Reddit findings directional. Optional tuning: reddit_sort (default 'top'), reddit_timeframe (default 'year'), reddit_max_posts (default 50), reddit_max_comments_per_post (default 20).",
+  "g2_names":             [],
+  "g2_urls":              [],
+  "capterra_urls":        []
+}

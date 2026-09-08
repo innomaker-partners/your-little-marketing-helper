@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "meeting-intel",
+  "version": "1.0.0",
+  "description": "Research external meeting participants and produce intelligence briefs before your calls.",
+  "author": {
+    "name": "InnoMaker Partners"
+  },
+  "license": "MIT"
+}

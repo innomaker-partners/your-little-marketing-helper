@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "workflow-workarounds",
+  "version": "1.0.0",
+  "description": "Two general workarounds for platforms that block clean programmatic access: an authenticated API proxy through a Make.com webhook (for anything an account can reach behind OAuth), and a method for building deterministic browser automations for web workflows that have no usable API.",
+  "author": {
+    "name": "InnoMaker Partners"
+  },
+  "license": "MIT",
+  "keywords": [
+    "workaround",
+    "make.com",
+    "oauth-proxy",
+    "api-proxy",
+    "browser-automation",
+    "claude-in-chrome",
+    "microsoft-graph",
+    "meta"
+  ]
+}

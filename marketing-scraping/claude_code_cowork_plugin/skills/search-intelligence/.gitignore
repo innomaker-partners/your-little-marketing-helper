@@ -1,0 +1,7 @@
+# Filled working config (holds no secrets, but is per-user) — commit the .example instead
+SEARCH_CONFIG.json
+# Python cache
+__pycache__/
+*.pyc
+# scripts/.env if a user creates one
+scripts/.env

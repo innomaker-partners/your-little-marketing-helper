@@ -1,0 +1,3720 @@
+{
+ "flow": [
+  {
+   "id": 1,
+   "mapper": {
+    "qs": [
+     {
+      "key": "startDateTime",
+      "value": "{{formatDate(now; \"YYYY-MM-DD\")}}T00:00:00"
+     },
+     {
+      "key": "endDateTime",
+      "value": "{{formatDate(now; \"YYYY-MM-DD\")}}T23:59:59"
+     },
+     {
+      "key": "$select",
+      "value": "subject,start,end,attendees,organizer,bodyPreview"
+     },
+     {
+      "key": "$top",
+      "value": "20"
+     }
+    ],
+    "url": "/v1.0/me/calendarView",
+    "method": "GET",
+    "headers": []
+   },
+   "module": "microsoft-calendar:makeApiCall",
+   "version": 2,
+   "metadata": {
+    "designer": {
+     "x": -581,
+     "y": 1
+    }
+   },
+   "parameters": {
+    "__IMTCONN__": 0
+   }
+  },
+  {
+   "id": 25,
+   "mapper": {
+    "array": "{{1.body.value}}"
+   },
+   "module": "builtin:BasicFeeder",
+   "version": 1,
+   "metadata": {
+    "designer": {
+     "x": -98,
+     "y": 0
+    }
+   }
+  },
+  {
+   "id": 2,
+   "mapper": {
+    "model": "gpt-5.4-mini",
+    "top_p": "1",
+    "select": "chat",
+    "messages": [
+     {
+      "role": "system",
+      "content": "You extract meeting participants from calendar event data.\n\nOutput a JSON array of external participants:\n[{\"name\": \"Jane Doe\", \"email\": \"jane@acme.com\", \"email_domain\": \"acme.com\", \"company_guess\": \"Acme Corp\", \"is_corporate_email\": true}]\n\nRules:\n- Exclude participants whose email domain matches the user's domain(s): {{user_domains}}\n- If more than 5 external participants, prioritize by seniority: prefer titles containing CEO, CFO, CTO, VP, Director, Partner, Founder, Owner over generic roles\n- is_corporate_email: false for gmail.com, outlook.com, hotmail.com, yahoo.com, icloud.com, protonmail.com, and other personal email providers\n- email_domain: the part after @ in the email address (e.g., jane@acme.com -> acme.com)\n- company_guess: extract from the email domain for corporate emails, or from any available context (meeting title, description) for personal emails. For personal email providers, set company_guess to the best guess from context, or \"Unknown\" if nothing is available.\n- company_guess MUST be at least two words (e.g. \"Acme Corporation\", \"State University\", never just \"Acme\" or \"State\"). If the natural name is a single word, extend it with its legal or descriptive form (e.g. \"Corp\", \"University\", \"Ltd\"). The downstream LinkedIn search runs queries of three or fewer total words as an exact quoted phrase and returns zero results, so a one-word company_guess silently breaks person research.\n- If \"name\": \"jane@acme.com\" (so the email address in the place of the name as well), try to infer the name from the email address and return that back instead of the email address.\n- Output valid JSON only, no markdown fences\n- If there are NO external participants (all attendees match the user's domain, or there are no attendees at all), output exactly: []"
+     },
+     {
+      "role": "user",
+      "content": "Meeting: {{25.subject}}\nDescription: {{25.bodyPreview}}\nAttendees: {{25.attendees}}"
+     }
+    ],
+    "max_tokens": "2048",
+    "temperature": "0.3",
+    "n_completions": "1",
+    "response_format": "text"
+   },
+   "module": "openai-gpt-3:CreateCompletion",
+   "version": 1,
+   "metadata": {
+    "expect": [
+     {
+      "name": "select",
+      "type": "select",
+      "label": "Select Method",
+      "required": true,
+      "validate": {
+       "enum": [
+        "chat",
+        "prompt"
+       ]
+      }
+     },
+     {
+      "name": "temperature",
+      "type": "number",
+      "label": "Temperature",
+      "validate": {
+       "max": 2,
+       "min": 0
+      }
+     },
+     {
+      "name": "top_p",
+      "type": "number",
+      "label": "Top P",
+      "validate": {
+       "max": 1,
+       "min": 0
+      }
+     },
+     {
+      "name": "n_completions",
+      "type": "number",
+      "label": "Number"
+     },
+     {
+      "name": "frequency_penalty",
+      "type": "number",
+      "label": "Frequency Penalty",
+      "validate": {
+       "max": 2,
+       "min": -2
+      }
+     },
+     {
+      "name": "presence_penalty",
+      "type": "number",
+      "label": "Presence Penalty",
+      "validate": {
+       "max": 2,
+       "min": -2
+      }
+     },
+     {
+      "name": "logit_bias",
+      "spec": {
+       "name": "value",
+       "spec": [
+        {
+         "name": "token",
+         "type": "text",
+         "label": "Token ID",
+         "required": true
+        },
+        {
+         "name": "probability",
+         "type": "number",
+         "label": "Probability",
+         "required": true,
+         "validate": {
+          "max": 100,
+          "min": -100
+         }
+        }
+       ],
+       "type": "collection",
+       "label": "Token Probability"
+      },
+      "type": "array",
+      "label": "Token Probability"
+     },
+     {
+      "name": "seed",
+      "type": "integer",
+      "label": "Seed"
+     },
+     {
+      "name": "tool_choice",
+      "type": "select",
+      "label": "Tool Choice",
+      "validate": {
+       "enum": [
+        "none",
+        "auto",
+        "required"
+       ]
+      }
+     },
+     {
+      "name": "stop",
+      "spec": {
+       "name": "value",
+       "type": "text",
+       "label": "Stop Sequence"
+      },
+      "type": "array",
+      "label": "Stop Sequences",
+      "validate": {
+       "maxItems": 4
+      }
+     },
+     {
+      "name": "additionalParameters",
+      "spec": {
+       "name": "value",
+       "spec": [
+        {
+         "name": "key",
+         "type": "text",
+         "label": "Parameter Name",
+         "required": true
+        },
+        {
+         "name": "type",
+         "type": "select",
+         "label": "Input Type",
+         "options": [
+          {
+           "label": "Text",
+           "value": "text",
+           "nested": [
+            {
+             "name": "value",
+             "type": "text",
+             "label": "Parameter Value"
+            }
+           ],
+           "default": true
+          },
+          {
+           "label": "Number",
+           "value": "number",
+           "nested": [
+            {
+             "name": "value",
+             "type": "number",
+             "label": "Parameter Value"
+            }
+           ]
+          },
+          {
+           "label": "Boolean",
+           "value": "boolean",
+           "nested": [
+            {
+             "name": "value",
+             "type": "boolean",
+             "label": "Parameter Value"
+            }
+           ]
+          },
+          {
+           "label": "Date",
+           "value": "date",
+           "nested": [
+            {
+             "name": "value",
+             "type": "date",
+             "label": "Parameter Value"
+            }
+           ]
+          },
+          {
+           "label": "Any",
+           "value": "any",
+           "nested": [
+            {
+             "name": "value",
+             "type": "any",
+             "label": "Parameter Value"
+            }
+           ]
+          }
+         ]
+        }
+       ],
+       "type": "collection",
+       "label": "Input Parameter"
+      },
+      "type": "array",
+      "label": "Other Input Parameters"
+     },
+     {
+      "name": "model",
+      "type": "select",
+      "label": "Model",
+      "required": true
+     },
+     {
+      "name": "max_tokens",
+      "type": "uinteger",
+      "label": "Max Output Tokens"
+     },
+     {
+      "name": "messages",
+      "spec": {
+       "name": "value",
+       "spec": [
+        {
+         "name": "role",
+         "type": "select",
+         "label": "Role",
+         "options": {
+          "store": [
+           {
+            "label": "User",
+            "value": "user",
+            "nested": [
+             {
+              "help": "Text content of the message on behalf of the selected __Role__.",
+              "name": "content",
+              "type": "text",
+              "label": "Text Content"
+             }
+            ],
+            "default": true
+           },
+           {
+            "label": "Assistant",
+            "value": "assistant",
+            "nested": [
+             {
+              "help": "Text content of the message on behalf of the selected __Role__.",
+              "name": "content",
+              "type": "text",
+              "label": "Text Content"
+             },
+             {
+              "mode": "edit",
+              "name": "tool_calls",
+              "spec": {
+               "spec": [
+                {
+                 "name": "type",
+                 "type": "hidden",
+                 "default": "function"
+                },
+                {
+                 "help": "Map this directly from the output of a previous **Create a Completion** module. Look for `Choices[]: Message.Tool Calls[]: ID`.",
+                 "name": "id",
+                 "type": "text",
+                 "label": "Tool call ID"
+                },
+                {
+                 "name": "function",
+                 "spec": [
+                  {
+                   "help": "The name of the function previously called.",
+                   "name": "name",
+                   "type": "text",
+                   "label": "Name",
+                   "required": true
+                  },
+                  {
+                   "help": "The arguments previously output by the AI.",
+                   "name": "arguments",
+                   "type": "text",
+                   "label": "Arguments",
+                   "required": true
+                  }
+                 ],
+                 "type": "collection",
+                 "label": "Function"
+                }
+               ],
+               "type": "collection",
+               "label": "Tool Call"
+              },
+              "type": "array",
+              "label": "Tool Calls",
+              "labels": {
+               "add": "Add tool call"
+              },
+              "mappable": {
+               "help": "You can map the entire `Choices[]: Message.Tool Calls` array from a previous Create a Completion module here."
+              }
+             }
+            ]
+           },
+           {
+            "label": "Developer / System",
+            "value": "system",
+            "nested": [
+             {
+              "help": "Text content of the message on behalf of the selected __Role__.",
+              "name": "content",
+              "type": "text",
+              "label": "Text Content"
+             }
+            ]
+           },
+           {
+            "label": "Tool",
+            "value": "tool",
+            "nested": [
+             {
+              "help": "The return of the function. This role should only be used when you have processed a previous function call and want to send the output of the function execution back to the AI.",
+              "name": "content",
+              "type": "text",
+              "label": "Text Content",
+              "required": true
+             },
+             {
+              "help": "Map this directly from the output of a previous **Create a Completion** module. Look for `Choices[]: Message.Tool Calls[]: ID`.",
+              "name": "tool_call_id",
+              "type": "text",
+              "label": "Tool Call ID.",
+              "required": true
+             }
+            ]
+           }
+          ]
+         },
+         "required": true
+        }
+       ],
+       "type": "collection",
+       "label": "Message"
+      },
+      "type": "array",
+      "label": "Messages",
+      "required": true
+     },
+     {
+      "name": "response_format",
+      "type": "select",
+      "label": "Response Format",
+      "validate": {
+       "enum": [
+        "text",
+        "json_object"
+       ]
+      }
+     },
+     {
+      "name": "reasoning_effort",
+      "type": "select",
+      "label": "Reasoning Effort",
+      "validate": {
+       "enum": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ]
+      }
+     }
+    ],
+    "restore": {
+     "expect": {
+      "stop": {
+       "mode": "chose"
+      },
+      "model": {
+       "mode": "chose",
+       "label": "gpt-5.4-mini (system)Fast, cost-efficient mini model for coding, computer use, and subagents"
+      },
+      "select": {
+       "label": "Create a Chat Completion (GPT and o1 models)"
+      },
+      "messages": {
+       "mode": "chose",
+       "items": [
+        {
+         "role": {
+          "mode": "chose",
+          "label": "Developer / System"
+         }
+        },
+        {
+         "role": {
+          "mode": "chose",
+          "label": "User"
+         }
+        }
+       ]
+      },
+      "logit_bias": {
+       "mode": "chose"
+      },
+      "tool_choice": {
+       "mode": "chose",
+       "label": "Empty"
+      },
+      "response_format": {
+       "mode": "chose",
+       "label": "Text"
+      },
+      "reasoning_effort": {
+       "mode": "chose",
+       "label": "Empty"
+      },
+      "additionalParameters": {
+       "mode": "chose"
+      }
+     },
+     "parameters": {
+      "__IMTCONN__": {
+       "data": {
+        "scoped": "true",
+        "connection": "openai-gpt-3"
+       },
+       "label": "OpenAI connection"
+      }
+     }
+    },
+    "designer": {
+     "x": 283,
+     "y": -1
+    },
+    "interface": [
+     {
+      "name": "result",
+      "type": "any",
+      "label": "Result"
+     },
+     {
+      "name": "id",
+      "type": "text",
+      "label": "ID"
+     },
+     {
+      "name": "object",
+      "type": "text",
+      "label": "Object"
+     },
+     {
+      "name": "created",
+      "type": "date",
+      "label": "Created"
+     },
+     {
+      "name": "model",
+      "type": "text",
+      "label": "Model"
+     },
+     {
+      "name": "choices",
+      "spec": [
+       {
+        "name": "text",
+        "type": "text",
+        "label": "Text"
+       },
+       {
+        "name": "index",
+        "type": "number",
+        "label": "Index"
+       },
+       {
+        "name": "logprobs",
+        "type": "text",
+        "label": "Log Probs"
+       },
+       {
+        "name": "finish_reason",
+        "type": "text",
+        "label": "Finish Reason"
+       },
+       {
+        "name": "message",
+        "spec": [
+         {
+          "name": "role",
+          "type": "text",
+          "label": "Role"
+         },
+         {
+          "name": "content",
+          "type": "text",
+          "label": "Content"
+         },
+         {
+          "name": "tool_calls",
+          "spec": [
+           {
+            "name": "id",
+            "type": "text",
+            "label": "ID"
+           },
+           {
+            "name": "type",
+            "type": "text",
+            "label": "Type"
+           },
+           {
+            "name": "function",
+            "spec": [
+             {
+              "name": "name",
+              "type": "text",
+              "label": "Name"
+             },
+             {
+              "name": "arguments",
+              "type": "text",
+              "label": "Arguments"
+             }
+            ],
+            "type": "collection",
+            "label": "Function"
+           }
+          ],
+          "type": "array",
+          "label": "Tool Calls"
+         },
+         {
+          "name": "refusal",
+          "type": "text",
+          "label": "Refusal"
+         },
+         {
+          "name": "annotations",
+          "spec": [
+           {
+            "name": "type",
+            "type": "text",
+            "label": "Type"
+           },
+           {
+            "name": "url_citation",
+            "spec": [
+             {
+              "name": "end_index",
+              "type": "number",
+              "label": "End Index"
+             },
+             {
+              "name": "start_index",
+              "type": "number",
+              "label": "Start Index"
+             },
+             {
+              "name": "title",
+              "type": "text",
+              "label": "Title"
+             },
+             {
+              "name": "url",
+              "type": "text",
+              "label": "URL"
+             }
+            ],
+            "type": "collection",
+            "label": "URL Citation"
+           }
+          ],
+          "type": "array",
+          "label": "Annotations"
+         }
+        ],
+        "type": "collection",
+        "label": "Message"
+       }
+      ],
+      "type": "array",
+      "label": "Choices"
+     },
+     {
+      "name": "usage",
+      "spec": [
+       {
+        "name": "prompt_tokens",
+        "type": "number",
+        "label": "Prompt Tokens"
+       },
+       {
+        "name": "completion_tokens",
+        "type": "text",
+        "label": "Completion Tokens"
+       },
+       {
+        "name": "total_tokens",
+        "type": "number",
+        "label": "Total Tokens"
+       },
+       {
+        "name": "prompt_tokens_details",
+        "spec": [
+         {
+          "name": "cached_tokens",
+          "type": "uinteger",
+          "label": "Cached Tokens"
+         },
+         {
+          "name": "text_tokens",
+          "type": "uinteger",
+          "label": "Text Tokens"
+         },
+         {
+          "name": "image_tokens",
+          "type": "uinteger",
+          "label": "Image Tokens"
+         },
+         {
+          "name": "audio_tokens",
+          "type": "uinteger",
+          "label": "Audio Tokens"
+         }
+        ],
+        "type": "collection",
+        "label": "Prompt Tokens Details"
+       },
+       {
+        "name": "completion_tokens_details",
+        "spec": [
+         {
+          "name": "reasoning_tokens",
+          "type": "uinteger",
+          "label": "Reasoning Tokens"
+         },
+         {
+          "name": "text_tokens",
+          "type": "uinteger",
+          "label": "Text Tokens"
+         },
+         {
+          "name": "audio_tokens",
+          "type": "uinteger",
+          "label": "Audio Tokens"
+         },
+         {
+          "name": "accepted_prediction_tokens",
+          "type": "uinteger",
+          "label": "Accepted Prediction Tokens"
+         },
+         {
+          "name": "rejected_prediction_tokens",
+          "type": "uinteger",
+          "label": "Rejected Prediction Tokens"
+         }
+        ],
+        "type": "collection",
+        "label": "Completion Tokens Details"
+       }
+      ],
+      "type": "collection",
+      "label": "Usage"
+     },
+     {
+      "name": "service_tier",
+      "type": "text",
+      "label": "Service Tier"
+     },
+     {
+      "name": "system_fingerprint",
+      "type": "text",
+      "label": "System Fingerprint"
+     }
+    ],
+    "parameters": [
+     {
+      "name": "__IMTCONN__",
+      "type": "account:openai-gpt-3",
+      "label": "Connection",
+      "required": true
+     }
+    ]
+   },
+   "parameters": {
+    "__IMTCONN__": 0
+   }
+  },
+  {
+   "id": 3,
+   "filter": {
+    "name": "Has external participants",
+    "conditions": [
+     [
+      {
+       "a": "{{2.result}}",
+       "b": "\"is_corporate_email\":true",
+       "o": "text:contain"
+      }
+     ]
+    ]
+   },
+   "mapper": {
+    "json": "{{2.result}}"
+   },
+   "module": "json:ParseJSON",
+   "onerror": [
+    {
+     "id": 53,
+     "mapper": {},
+     "module": "builtin:Resume",
+     "version": 1,
+     "metadata": {
+      "designer": {
+       "x": 910,
+       "y": 321
+      }
+     },
+     "parameters": {}
+    }
+   ],
+   "version": 1,
+   "metadata": {
+    "designer": {
+     "x": 802,
+     "y": 1
+    }
+   },
+   "parameters": {}
+  },
+  {
+   "id": 4,
+   "mapper": {
+    "url": "https://{{3.email_domain}}",
+    "method": "get",
+    "shareCookies": false,
+    "parseResponse": true,
+    "allowRedirects": true,
+    "stopOnHttpError": true,
+    "requestCompressedContent": true
+   },
+   "module": "http:MakeRequest",
+   "onerror": [
+    {
+     "id": 50,
+     "mapper": {},
+     "module": "builtin:Resume",
+     "version": 1,
+     "metadata": {
+      "designer": {
+       "x": 1626,
+       "y": 371
+      }
+     },
+     "parameters": {}
+    }
+   ],
+   "version": 4,
+   "metadata": {
+    "designer": {
+     "x": 1377,
+     "y": -3
+    }
+   },
+   "parameters": {
+    "tlsType": "",
+    "authenticationType": "noAuth"
+   }
+  },
+  {
+   "id": 5,
+   "mapper": null,
+   "module": "builtin:BasicIfElse",
+   "version": 1,
+   "branches": [
+    {
+     "flow": [
+      {
+       "id": 6,
+       "mapper": {
+        "actorId": "aYG0l9s7dbB7j3gbS",
+        "runSync": true,
+        "timeout": "120",
+        "actor_search_type": "store",
+        "inputBodyaYG0l9s7dbB7j3gbS": "{\"startUrls\": [{\"url\": \"https://{{3.email_domain}}\"}], \"maxCrawledPages\": 8, \"crawlerType\": \"cheerio\"}"
+       },
+       "module": "apify:runActorNew",
+       "version": 1,
+       "metadata": {
+        "expect": [
+         {
+          "name": "actor_search_type",
+          "type": "select",
+          "label": "Search Actors from",
+          "required": true,
+          "validate": {
+           "enum": [
+            "user",
+            "store"
+           ]
+          }
+         },
+         {
+          "name": "runSync",
+          "type": "boolean",
+          "label": "Run synchronously",
+          "required": true
+         },
+         {
+          "name": "build",
+          "type": "text",
+          "label": "Build"
+         },
+         {
+          "name": "timeout",
+          "type": "uinteger",
+          "label": "Timeout"
+         },
+         {
+          "name": "memory",
+          "type": "select",
+          "label": "Memory",
+          "validate": {
+           "enum": [
+            128,
+            256,
+            512,
+            1024,
+            2048,
+            4096,
+            8192,
+            16384,
+            32768
+           ]
+          }
+         },
+         {
+          "name": "actorId",
+          "type": "select",
+          "label": "Actor",
+          "required": true
+         },
+         {
+          "name": "inputBodyaYG0l9s7dbB7j3gbS",
+          "type": "text",
+          "label": "Input JSON",
+          "required": true
+         },
+         {
+          "name": "maxTotalChargeUsd",
+          "type": "hidden",
+          "label": "Maximum cost per run"
+         },
+         {
+          "name": "maxItems",
+          "type": "hidden",
+          "label": "Maximum charged results"
+         }
+        ],
+        "restore": {
+         "expect": {
+          "memory": {
+           "mode": "chose",
+           "label": "Empty"
+          },
+          "actorId": {
+           "mode": "chose",
+           "label": "Website Content Crawler (apify/website-content-crawler)"
+          },
+          "runSync": {
+           "mode": "chose"
+          },
+          "actor_search_type": {
+           "label": "Apify Store Actors"
+          }
+         },
+         "parameters": {
+          "__IMTCONN__": {
+           "data": {
+            "scoped": "true",
+            "connection": "apify2"
+           },
+           "label": "Apify connection"
+          }
+         }
+        },
+        "designer": {
+         "x": 2400,
+         "y": -300
+        },
+        "parameters": [
+         {
+          "name": "__IMTCONN__",
+          "type": "account:apify2,apify",
+          "label": "Connection",
+          "required": true
+         }
+        ]
+       },
+       "parameters": {
+        "__IMTCONN__": 0
+       }
+      },
+      {
+       "id": 7,
+       "mapper": {
+        "type": "clean",
+        "limit": "100",
+        "format": "json",
+        "datasetId": "{{6.defaultDatasetId}}"
+       },
+       "module": "apify:fetchDatasetItems",
+       "version": 1,
+       "metadata": {
+        "designer": {
+         "x": 2700,
+         "y": -300
+        }
+       },
+       "parameters": {
+        "__IMTCONN__": 0
+       }
+      },
+      {
+       "id": 8,
+       "mapper": {
+        "value": "--- PAGE ---\nURL: {{7.url}}\nTitle: {{7.title}}\nContent: {{7.text}}"
+       },
+       "module": "util:TextAggregator",
+       "version": 1,
+       "metadata": {
+        "designer": {
+         "x": 3071,
+         "y": -299
+        }
+       },
+       "parameters": {
+        "feeder": 7,
+        "rowSeparator": null
+       }
+      }
+     ],
+     "type": "condition",
+     "label": "",
+     "merge": true,
+     "conditions": [
+      [
+       {
+        "a": "{{3.is_corporate_email}}",
+        "b": "true",
+        "o": "text:equal"
+       },
+       {
+        "a": "{{4.statusCode}}",
+        "b": "199",
+        "o": "number:greater"
+       },
+       {
+        "a": "{{4.statusCode}}",
+        "b": "400",
+        "o": "number:less"
+       }
+      ]
+     ]
+    },
+    {
+     "flow": [
+      {
+       "id": 9,
+       "mapper": {
+        "actorId": "nwua9Gu5YrADL7ZDj",
+        "runSync": true,
+        "timeout": "120",
+        "actor_search_type": "store",
+        "inputBodynwua9Gu5YrADL7ZDj": "{\"searchStringsArray\": [\"{{3.company_guess}}\"], \"maxCrawledPlacesPerSearch\": 3, \"language\": \"en\"}"
+       },
+       "module": "apify:runActorNew",
+       "version": 1,
+       "metadata": {
+        "expect": [
+         {
+          "name": "actor_search_type",
+          "type": "select",
+          "label": "Search Actors from",
+          "required": true,
+          "validate": {
+           "enum": [
+            "user",
+            "store"
+           ]
+          }
+         },
+         {
+          "name": "runSync",
+          "type": "boolean",
+          "label": "Run synchronously",
+          "required": true
+         },
+         {
+          "name": "build",
+          "type": "text",
+          "label": "Build"
+         },
+         {
+          "name": "timeout",
+          "type": "uinteger",
+          "label": "Timeout"
+         },
+         {
+          "name": "memory",
+          "type": "select",
+          "label": "Memory",
+          "validate": {
+           "enum": [
+            128,
+            256,
+            512,
+            1024,
+            2048,
+            4096,
+            8192,
+            16384,
+            32768
+           ]
+          }
+         },
+         {
+          "name": "actorId",
+          "type": "select",
+          "label": "Actor",
+          "required": true
+         },
+         {
+          "name": "inputBodynwua9Gu5YrADL7ZDj",
+          "type": "text",
+          "label": "Input JSON",
+          "required": true
+         },
+         {
+          "name": "maxTotalChargeUsd",
+          "type": "number",
+          "label": "Maximum cost per run"
+         },
+         {
+          "name": "maxItems",
+          "type": "hidden",
+          "label": "Maximum charged results"
+         }
+        ],
+        "restore": {
+         "expect": {
+          "memory": {
+           "mode": "chose",
+           "label": "Empty"
+          },
+          "actorId": {
+           "mode": "chose",
+           "label": "Google Maps Scraper (compass/crawler-google-places)"
+          },
+          "runSync": {
+           "mode": "chose"
+          },
+          "actor_search_type": {
+           "label": "Apify Store Actors"
+          }
+         },
+         "parameters": {
+          "__IMTCONN__": {
+           "data": {
+            "scoped": "true",
+            "connection": "apify2"
+           },
+           "label": "Apify connection"
+          }
+         }
+        },
+        "designer": {
+         "x": 2400,
+         "y": 300
+        },
+        "parameters": [
+         {
+          "name": "__IMTCONN__",
+          "type": "account:apify2,apify",
+          "label": "Connection",
+          "required": true
+         }
+        ]
+       },
+       "parameters": {
+        "__IMTCONN__": 0
+       }
+      },
+      {
+       "id": 10,
+       "mapper": {
+        "type": "clean",
+        "limit": "100",
+        "format": "json",
+        "datasetId": "{{9.defaultDatasetId}}"
+       },
+       "module": "apify:fetchDatasetItems",
+       "version": 1,
+       "metadata": {
+        "expect": [
+         {
+          "name": "datasetId",
+          "type": "text",
+          "label": "Dataset ID",
+          "required": true
+         },
+         {
+          "name": "type",
+          "type": "select",
+          "label": "Data transformation",
+          "required": true,
+          "validate": {
+           "enum": [
+            "clean",
+            "simplified",
+            "none"
+           ]
+          }
+         },
+         {
+          "name": "format",
+          "type": "select",
+          "label": "Format",
+          "required": true,
+          "validate": {
+           "enum": [
+            "json",
+            "csv",
+            "html",
+            "xml",
+            "rss",
+            "xlsx"
+           ]
+          }
+         },
+         {
+          "name": "limit",
+          "type": "uinteger",
+          "label": "Limit",
+          "validate": {
+           "max": 100000,
+           "min": 1
+          }
+         },
+         {
+          "name": "offset",
+          "type": "uinteger",
+          "label": "Offset",
+          "validate": {
+           "min": 0
+          }
+         },
+         {
+          "name": "fields",
+          "type": "text",
+          "label": "Fields"
+         },
+         {
+          "name": "omit",
+          "type": "text",
+          "label": "Omit Fields"
+         }
+        ],
+        "restore": {
+         "expect": {
+          "type": {
+           "mode": "chose",
+           "label": "Clean"
+          },
+          "format": {
+           "mode": "chose",
+           "label": "JSON"
+          }
+         },
+         "parameters": {
+          "__IMTCONN__": {
+           "data": {
+            "scoped": "true",
+            "connection": "apify2"
+           },
+           "label": "Apify connection"
+          }
+         }
+        },
+        "designer": {
+         "x": 2700,
+         "y": 300
+        },
+        "parameters": [
+         {
+          "name": "__IMTCONN__",
+          "type": "account:apify2,apify",
+          "label": "Connection",
+          "required": true
+         }
+        ]
+       },
+       "parameters": {
+        "__IMTCONN__": 0
+       }
+      },
+      {
+       "id": 11,
+       "mapper": {
+        "value": "--- PLACE ---\nName: {{10.title}}\nWebsite: {{10.website}}\nAddress: {{10.address}}"
+       },
+       "module": "util:TextAggregator",
+       "version": 1,
+       "metadata": {
+        "designer": {
+         "x": 3000,
+         "y": 300
+        }
+       },
+       "parameters": {
+        "feeder": 10,
+        "rowSeparator": null
+       }
+      },
+      {
+       "id": 12,
+       "mapper": {
+        "model": "gpt-5.4-mini",
+        "top_p": "1",
+        "select": "chat",
+        "messages": [
+         {
+          "role": "system",
+          "content": "You are selecting the correct company website from Google Maps search results.\n\nYou receive:\n1) The company we are looking for\n2) A list of Google Maps PLACES (each with a name, website, address)\n\nTask:\n- Choose the ONE place whose name matches the target company most exactly (the same business, NOT a similarly-named different company)\n- Output ONLY that place's website URL and nothing else (no quotes, no extra words)\n- If none of the places clearly matches the target company, output exactly: NONE\n\nNever invent a URL. Output only a website that appears in the list, or NONE."
+         },
+         {
+          "role": "user",
+          "content": "=== COMPANY WE WANT ===\n{{3.company_guess}}\n\n=== GOOGLE MAPS PLACES ===\n{{11.text}}"
+         }
+        ],
+        "max_tokens": "2048",
+        "temperature": "0.3",
+        "n_completions": "1",
+        "response_format": "text"
+       },
+       "module": "openai-gpt-3:CreateCompletion",
+       "version": 1,
+       "metadata": {
+        "expect": [
+         {
+          "name": "select",
+          "type": "select",
+          "label": "Select Method",
+          "required": true,
+          "validate": {
+           "enum": [
+            "chat",
+            "prompt"
+           ]
+          }
+         },
+         {
+          "name": "temperature",
+          "type": "number",
+          "label": "Temperature",
+          "validate": {
+           "max": 2,
+           "min": 0
+          }
+         },
+         {
+          "name": "top_p",
+          "type": "number",
+          "label": "Top P",
+          "validate": {
+           "max": 1,
+           "min": 0
+          }
+         },
+         {
+          "name": "n_completions",
+          "type": "number",
+          "label": "Number"
+         },
+         {
+          "name": "frequency_penalty",
+          "type": "number",
+          "label": "Frequency Penalty",
+          "validate": {
+           "max": 2,
+           "min": -2
+          }
+         },
+         {
+          "name": "presence_penalty",
+          "type": "number",
+          "label": "Presence Penalty",
+          "validate": {
+           "max": 2,
+           "min": -2
+          }
+         },
+         {
+          "name": "logit_bias",
+          "spec": {
+           "name": "value",
+           "spec": [
+            {
+             "name": "token",
+             "type": "text",
+             "label": "Token ID",
+             "required": true
+            },
+            {
+             "name": "probability",
+             "type": "number",
+             "label": "Probability",
+             "required": true,
+             "validate": {
+              "max": 100,
+              "min": -100
+             }
+            }
+           ],
+           "type": "collection",
+           "label": "Token Probability"
+          },
+          "type": "array",
+          "label": "Token Probability"
+         },
+         {
+          "name": "seed",
+          "type": "integer",
+          "label": "Seed"
+         },
+         {
+          "name": "tool_choice",
+          "type": "select",
+          "label": "Tool Choice",
+          "validate": {
+           "enum": [
+            "none",
+            "auto",
+            "required"
+           ]
+          }
+         },
+         {
+          "name": "stop",
+          "spec": {
+           "name": "value",
+           "type": "text",
+           "label": "Stop Sequence"
+          },
+          "type": "array",
+          "label": "Stop Sequences",
+          "validate": {
+           "maxItems": 4
+          }
+         },
+         {
+          "name": "additionalParameters",
+          "spec": {
+           "name": "value",
+           "spec": [
+            {
+             "name": "key",
+             "type": "text",
+             "label": "Parameter Name",
+             "required": true
+            },
+            {
+             "name": "type",
+             "type": "select",
+             "label": "Input Type",
+             "options": [
+              {
+               "label": "Text",
+               "value": "text",
+               "nested": [
+                {
+                 "name": "value",
+                 "type": "text",
+                 "label": "Parameter Value"
+                }
+               ],
+               "default": true
+              },
+              {
+               "label": "Number",
+               "value": "number",
+               "nested": [
+                {
+                 "name": "value",
+                 "type": "number",
+                 "label": "Parameter Value"
+                }
+               ]
+              },
+              {
+               "label": "Boolean",
+               "value": "boolean",
+               "nested": [
+                {
+                 "name": "value",
+                 "type": "boolean",
+                 "label": "Parameter Value"
+                }
+               ]
+              },
+              {
+               "label": "Date",
+               "value": "date",
+               "nested": [
+                {
+                 "name": "value",
+                 "type": "date",
+                 "label": "Parameter Value"
+                }
+               ]
+              },
+              {
+               "label": "Any",
+               "value": "any",
+               "nested": [
+                {
+                 "name": "value",
+                 "type": "any",
+                 "label": "Parameter Value"
+                }
+               ]
+              }
+             ]
+            }
+           ],
+           "type": "collection",
+           "label": "Input Parameter"
+          },
+          "type": "array",
+          "label": "Other Input Parameters"
+         },
+         {
+          "name": "model",
+          "type": "select",
+          "label": "Model",
+          "required": true
+         },
+         {
+          "name": "max_tokens",
+          "type": "uinteger",
+          "label": "Max Output Tokens"
+         },
+         {
+          "name": "messages",
+          "spec": {
+           "name": "value",
+           "spec": [
+            {
+             "name": "role",
+             "type": "select",
+             "label": "Role",
+             "options": {
+              "store": [
+               {
+                "label": "User",
+                "value": "user",
+                "nested": [
+                 {
+                  "help": "Text content of the message on behalf of the selected __Role__.",
+                  "name": "content",
+                  "type": "text",
+                  "label": "Text Content"
+                 }
+                ],
+                "default": true
+               },
+               {
+                "label": "Assistant",
+                "value": "assistant",
+                "nested": [
+                 {
+                  "help": "Text content of the message on behalf of the selected __Role__.",
+                  "name": "content",
+                  "type": "text",
+                  "label": "Text Content"
+                 },
+                 {
+                  "mode": "edit",
+                  "name": "tool_calls",
+                  "spec": {
+                   "spec": [
+                    {
+                     "name": "type",
+                     "type": "hidden",
+                     "default": "function"
+                    },
+                    {
+                     "help": "Map this directly from the output of a previous **Create a Completion** module. Look for `Choices[]: Message.Tool Calls[]: ID`.",
+                     "name": "id",
+                     "type": "text",
+                     "label": "Tool call ID"
+                    },
+                    {
+                     "name": "function",
+                     "spec": [
+                      {
+                       "help": "The name of the function previously called.",
+                       "name": "name",
+                       "type": "text",
+                       "label": "Name",
+                       "required": true
+                      },
+                      {
+                       "help": "The arguments previously output by the AI.",
+                       "name": "arguments",
+                       "type": "text",
+                       "label": "Arguments",
+                       "required": true
+                      }
+                     ],
+                     "type": "collection",
+                     "label": "Function"
+                    }
+                   ],
+                   "type": "collection",
+                   "label": "Tool Call"
+                  },
+                  "type": "array",
+                  "label": "Tool Calls",
+                  "labels": {
+                   "add": "Add tool call"
+                  },
+                  "mappable": {
+                   "help": "You can map the entire `Choices[]: Message.Tool Calls` array from a previous Create a Completion module here."
+                  }
+                 }
+                ]
+               },
+               {
+                "label": "Developer / System",
+                "value": "system",
+                "nested": [
+                 {
+                  "help": "Text content of the message on behalf of the selected __Role__.",
+                  "name": "content",
+                  "type": "text",
+                  "label": "Text Content"
+                 }
+                ]
+               },
+               {
+                "label": "Tool",
+                "value": "tool",
+                "nested": [
+                 {
+                  "help": "The return of the function. This role should only be used when you have processed a previous function call and want to send the output of the function execution back to the AI.",
+                  "name": "content",
+                  "type": "text",
+                  "label": "Text Content",
+                  "required": true
+                 },
+                 {
+                  "help": "Map this directly from the output of a previous **Create a Completion** module. Look for `Choices[]: Message.Tool Calls[]: ID`.",
+                  "name": "tool_call_id",
+                  "type": "text",
+                  "label": "Tool Call ID.",
+                  "required": true
+                 }
+                ]
+               }
+              ]
+             },
+             "required": true
+            }
+           ],
+           "type": "collection",
+           "label": "Message"
+          },
+          "type": "array",
+          "label": "Messages",
+          "required": true
+         },
+         {
+          "name": "response_format",
+          "type": "select",
+          "label": "Response Format",
+          "validate": {
+           "enum": [
+            "text",
+            "json_object"
+           ]
+          }
+         },
+         {
+          "name": "reasoning_effort",
+          "type": "select",
+          "label": "Reasoning Effort",
+          "validate": {
+           "enum": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+           ]
+          }
+         }
+        ],
+        "restore": {
+         "expect": {
+          "stop": {
+           "mode": "chose"
+          },
+          "model": {
+           "mode": "chose",
+           "label": "gpt-5.4-mini (system)Fast, cost-efficient mini model for coding, computer use, and subagents"
+          },
+          "select": {
+           "label": "Create a Chat Completion (GPT and o1 models)"
+          },
+          "messages": {
+           "mode": "chose",
+           "items": [
+            {
+             "role": {
+              "mode": "chose",
+              "label": "Developer / System"
+             }
+            },
+            {
+             "role": {
+              "mode": "chose",
+              "label": "User"
+             }
+            }
+           ]
+          },
+          "logit_bias": {
+           "mode": "chose"
+          },
+          "tool_choice": {
+           "mode": "chose",
+           "label": "Empty"
+          },
+          "response_format": {
+           "mode": "chose",
+           "label": "Text"
+          },
+          "reasoning_effort": {
+           "mode": "chose",
+           "label": "Empty"
+          },
+          "additionalParameters": {
+           "mode": "chose"
+          }
+         },
+         "parameters": {
+          "__IMTCONN__": {
+           "data": {
+            "scoped": "true",
+            "connection": "openai-gpt-3"
+           },
+           "label": "OpenAI connection"
+          }
+         }
+        },
+        "designer": {
+         "x": 3300,
+         "y": 300
+        },
+        "interface": [
+         {
+          "name": "result",
+          "type": "any",
+          "label": "Result"
+         },
+         {
+          "name": "id",
+          "type": "text",
+          "label": "ID"
+         },
+         {
+          "name": "object",
+          "type": "text",
+          "label": "Object"
+         },
+         {
+          "name": "created",
+          "type": "date",
+          "label": "Created"
+         },
+         {
+          "name": "model",
+          "type": "text",
+          "label": "Model"
+         },
+         {
+          "name": "choices",
+          "spec": [
+           {
+            "name": "text",
+            "type": "text",
+            "label": "Text"
+           },
+           {
+            "name": "index",
+            "type": "number",
+            "label": "Index"
+           },
+           {
+            "name": "logprobs",
+            "type": "text",
+            "label": "Log Probs"
+           },
+           {
+            "name": "finish_reason",
+            "type": "text",
+            "label": "Finish Reason"
+           },
+           {
+            "name": "message",
+            "spec": [
+             {
+              "name": "role",
+              "type": "text",
+              "label": "Role"
+             },
+             {
+              "name": "content",
+              "type": "text",
+              "label": "Content"
+             },
+             {
+              "name": "tool_calls",
+              "spec": [
+               {
+                "name": "id",
+                "type": "text",
+                "label": "ID"
+               },
+               {
+                "name": "type",
+                "type": "text",
+                "label": "Type"
+               },
+               {
+                "name": "function",
+                "spec": [
+                 {
+                  "name": "name",
+                  "type": "text",
+                  "label": "Name"
+                 },
+                 {
+                  "name": "arguments",
+                  "type": "text",
+                  "label": "Arguments"
+                 }
+                ],
+                "type": "collection",
+                "label": "Function"
+               }
+              ],
+              "type": "array",
+              "label": "Tool Calls"
+             },
+             {
+              "name": "refusal",
+              "type": "text",
+              "label": "Refusal"
+             },
+             {
+              "name": "annotations",
+              "spec": [
+               {
+                "name": "type",
+                "type": "text",
+                "label": "Type"
+               },
+               {
+                "name": "url_citation",
+                "spec": [
+                 {
+                  "name": "end_index",
+                  "type": "number",
+                  "label": "End Index"
+                 },
+                 {
+                  "name": "start_index",
+                  "type": "number",
+                  "label": "Start Index"
+                 },
+                 {
+                  "name": "title",
+                  "type": "text",
+                  "label": "Title"
+                 },
+                 {
+                  "name": "url",
+                  "type": "text",
+                  "label": "URL"
+                 }
+                ],
+                "type": "collection",
+                "label": "URL Citation"
+               }
+              ],
+              "type": "array",
+              "label": "Annotations"
+             }
+            ],
+            "type": "collection",
+            "label": "Message"
+           }
+          ],
+          "type": "array",
+          "label": "Choices"
+         },
+         {
+          "name": "usage",
+          "spec": [
+           {
+            "name": "prompt_tokens",
+            "type": "number",
+            "label": "Prompt Tokens"
+           },
+           {
+            "name": "completion_tokens",
+            "type": "text",
+            "label": "Completion Tokens"
+           },
+           {
+            "name": "total_tokens",
+            "type": "number",
+            "label": "Total Tokens"
+           },
+           {
+            "name": "prompt_tokens_details",
+            "spec": [
+             {
+              "name": "cached_tokens",
+              "type": "uinteger",
+              "label": "Cached Tokens"
+             },
+             {
+              "name": "text_tokens",
+              "type": "uinteger",
+              "label": "Text Tokens"
+             },
+             {
+              "name": "image_tokens",
+              "type": "uinteger",
+              "label": "Image Tokens"
+             },
+             {
+              "name": "audio_tokens",
+              "type": "uinteger",
+              "label": "Audio Tokens"
+             }
+            ],
+            "type": "collection",
+            "label": "Prompt Tokens Details"
+           },
+           {
+            "name": "completion_tokens_details",
+            "spec": [
+             {
+              "name": "reasoning_tokens",
+              "type": "uinteger",
+              "label": "Reasoning Tokens"
+             },
+             {
+              "name": "text_tokens",
+              "type": "uinteger",
+              "label": "Text Tokens"
+             },
+             {
+              "name": "audio_tokens",
+              "type": "uinteger",
+              "label": "Audio Tokens"
+             },
+             {
+              "name": "accepted_prediction_tokens",
+              "type": "uinteger",
+              "label": "Accepted Prediction Tokens"
+             },
+             {
+              "name": "rejected_prediction_tokens",
+              "type": "uinteger",
+              "label": "Rejected Prediction Tokens"
+             }
+            ],
+            "type": "collection",
+            "label": "Completion Tokens Details"
+           }
+          ],
+          "type": "collection",
+          "label": "Usage"
+         },
+         {
+          "name": "service_tier",
+          "type": "text",
+          "label": "Service Tier"
+         },
+         {
+          "name": "system_fingerprint",
+          "type": "text",
+          "label": "System Fingerprint"
+         }
+        ],
+        "parameters": [
+         {
+          "name": "__IMTCONN__",
+          "type": "account:openai-gpt-3",
+          "label": "Connection",
+          "required": true
+         }
+        ]
+       },
+       "parameters": {
+        "__IMTCONN__": 0
+       }
+      },
+      {
+       "id": 13,
+       "mapper": {
+        "actorId": "aYG0l9s7dbB7j3gbS",
+        "runSync": true,
+        "timeout": "120",
+        "actor_search_type": "store",
+        "inputBodyaYG0l9s7dbB7j3gbS": "{\"startUrls\": [{\"url\": \"{{12.result}}\"}], \"maxCrawledPages\": 8, \"crawlerType\": \"cheerio\"}"
+       },
+       "module": "apify:runActorNew",
+       "onerror": [
+        {
+         "id": 51,
+         "mapper": {},
+         "module": "builtin:Resume",
+         "version": 1,
+         "metadata": {
+          "designer": {
+           "x": 3734,
+           "y": 713
+          }
+         },
+         "parameters": {}
+        }
+       ],
+       "version": 1,
+       "metadata": {
+        "expect": [
+         {
+          "name": "actor_search_type",
+          "type": "select",
+          "label": "Search Actors from",
+          "required": true,
+          "validate": {
+           "enum": [
+            "user",
+            "store"
+           ]
+          }
+         },
+         {
+          "name": "runSync",
+          "type": "boolean",
+          "label": "Run synchronously",
+          "required": true
+         },
+         {
+          "name": "build",
+          "type": "text",
+          "label": "Build"
+         },
+         {
+          "name": "timeout",
+          "type": "uinteger",
+          "label": "Timeout"
+         },
+         {
+          "name": "memory",
+          "type": "select",
+          "label": "Memory",
+          "validate": {
+           "enum": [
+            128,
+            256,
+            512,
+            1024,
+            2048,
+            4096,
+            8192,
+            16384,
+            32768
+           ]
+          }
+         },
+         {
+          "name": "actorId",
+          "type": "select",
+          "label": "Actor",
+          "required": true
+         },
+         {
+          "name": "inputBodyaYG0l9s7dbB7j3gbS",
+          "type": "text",
+          "label": "Input JSON",
+          "required": true
+         },
+         {
+          "name": "maxTotalChargeUsd",
+          "type": "hidden",
+          "label": "Maximum cost per run"
+         },
+         {
+          "name": "maxItems",
+          "type": "hidden",
+          "label": "Maximum charged results"
+         }
+        ],
+        "restore": {
+         "expect": {
+          "memory": {
+           "mode": "chose",
+           "label": "Empty"
+          },
+          "actorId": {
+           "mode": "chose",
+           "label": "Website Content Crawler (apify/website-content-crawler)"
+          },
+          "runSync": {
+           "mode": "chose"
+          },
+          "actor_search_type": {
+           "label": "Apify Store Actors"
+          }
+         },
+         "parameters": {
+          "__IMTCONN__": {
+           "data": {
+            "scoped": "true",
+            "connection": "apify2"
+           },
+           "label": "Apify connection"
+          }
+         }
+        },
+        "designer": {
+         "x": 3600,
+         "y": 300
+        },
+        "parameters": [
+         {
+          "name": "__IMTCONN__",
+          "type": "account:apify2,apify",
+          "label": "Connection",
+          "required": true
+         }
+        ]
+       },
+       "parameters": {
+        "__IMTCONN__": 0
+       }
+      },
+      {
+       "id": 14,
+       "mapper": {
+        "type": "clean",
+        "limit": "100",
+        "format": "json",
+        "datasetId": "{{13.defaultDatasetId}}"
+       },
+       "module": "apify:fetchDatasetItems",
+       "onerror": [
+        {
+         "id": 52,
+         "mapper": {},
+         "module": "builtin:Resume",
+         "version": 1,
+         "metadata": {
+          "designer": {
+           "x": 4144,
+           "y": 709
+          }
+         },
+         "parameters": {}
+        }
+       ],
+       "version": 1,
+       "metadata": {
+        "designer": {
+         "x": 3900,
+         "y": 300
+        }
+       },
+       "parameters": {
+        "__IMTCONN__": 0
+       }
+      },
+      {
+       "id": 15,
+       "mapper": {
+        "value": "--- PAGE ---\nURL: {{14.url}}\nTitle: {{14.title}}\nContent: {{14.text}}"
+       },
+       "module": "util:TextAggregator",
+       "version": 1,
+       "metadata": {
+        "designer": {
+         "x": 4200,
+         "y": 300
+        }
+       },
+       "parameters": {
+        "feeder": 14,
+        "rowSeparator": null
+       }
+      }
+     ],
+     "type": "else",
+     "label": "",
+     "merge": true,
+     "disabled": false
+    }
+   ],
+   "metadata": {
+    "designer": {
+     "x": 2100,
+     "y": 0
+    }
+   },
+   "parameters": {}
+  },
+  {
+   "id": 16,
+   "mapper": null,
+   "module": "builtin:BasicMerge",
+   "filters": [
+    null,
+    null
+   ],
+   "outputs": [],
+   "version": 1,
+   "metadata": {
+    "designer": {
+     "x": 4500,
+     "y": 0
+    }
+   },
+   "parameters": {}
+  },
+  {
+   "id": 17,
+   "mapper": {
+    "model": "gpt-5.4-mini",
+    "top_p": 1,
+    "select": "chat",
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a B2B company researcher. Analyze the provided website content and extract structured company intelligence.\n\nExtract these fields with confidence tags:\n- company_name: [VERIFIED/INFERRED/NOT_FOUND]\n- headquarters: [VERIFIED/INFERRED/NOT_FOUND]\n- markets_served: [VERIFIED/INFERRED/NOT_FOUND]\n- business_model: [VERIFIED/INFERRED/NOT_FOUND]\n- employee_count: [VERIFIED/INFERRED/NOT_FOUND]\n- industry: [VERIFIED/INFERRED/NOT_FOUND]\n- key_products_services: [VERIFIED/INFERRED/NOT_FOUND]\n- years_in_business: [VERIFIED/INFERRED/NOT_FOUND]\n- leadership: [VERIFIED/INFERRED/NOT_FOUND]\n\nConfidence tags:\n- VERIFIED: explicitly stated on the website\n- INFERRED: derived from context (note the inference basis)\n- NOT_FOUND: not available from the provided content\n\nRules:\n- Never fabricate information\n- If the website content appears to be a parking page, error page, or unrelated to the expected company, state this clearly\n- Output as structured text with clear field labels"
+     },
+     {
+      "role": "user",
+      "content": "Participant: {{3.name}} ({{3.email}})\nExpected company: {{3.company_guess}}\n\n=== WEBSITE CONTENT ===\n{{ifempty(8.text; 15.text)}}"
+     }
+    ],
+    "max_tokens": 2048,
+    "temperature": 0.3,
+    "n_completions": 1,
+    "response_format": "text"
+   },
+   "module": "openai-gpt-3:CreateCompletion",
+   "version": 1,
+   "metadata": {
+    "designer": {
+     "x": 4800,
+     "y": 0
+    }
+   },
+   "parameters": {
+    "__IMTCONN__": 0
+   }
+  },
+  {
+   "id": 18,
+   "mapper": {
+    "actorId": "xfz4tG0OB6ClIGVGv",
+    "runSync": true,
+    "timeout": 120,
+    "actor_search_type": "store",
+    "inputBodyxfz4tG0OB6ClIGVGv": "{\"mode\": \"public\", \"keywords\": \"{{3.name}} {{3.company_guess}}\", \"maxResults\": 5}"
+   },
+   "module": "apify:runActorNew",
+   "version": 1,
+   "metadata": {
+    "expect": [
+     {
+      "name": "actor_search_type",
+      "type": "select",
+      "label": "Search Actors from",
+      "required": true,
+      "validate": {
+       "enum": [
+        "user",
+        "store"
+       ]
+      }
+     },
+     {
+      "name": "runSync",
+      "type": "boolean",
+      "label": "Run synchronously",
+      "required": true
+     },
+     {
+      "name": "build",
+      "type": "text",
+      "label": "Build"
+     },
+     {
+      "name": "timeout",
+      "type": "uinteger",
+      "label": "Timeout"
+     },
+     {
+      "name": "memory",
+      "type": "select",
+      "label": "Memory",
+      "validate": {
+       "enum": [
+        128,
+        256,
+        512,
+        1024,
+        2048,
+        4096,
+        8192,
+        16384,
+        32768
+       ]
+      }
+     },
+     {
+      "name": "actorId",
+      "type": "select",
+      "label": "Actor",
+      "required": true
+     },
+     {
+      "name": "inputBodyxfz4tG0OB6ClIGVGv",
+      "type": "text",
+      "label": "Input JSON",
+      "required": true
+     },
+     {
+      "name": "maxTotalChargeUsd",
+      "type": "number",
+      "label": "Maximum cost per run"
+     },
+     {
+      "name": "maxItems",
+      "type": "hidden",
+      "label": "Maximum charged results"
+     }
+    ],
+    "restore": {
+     "expect": {
+      "memory": {
+       "mode": "chose",
+       "label": "Empty"
+      },
+      "actorId": {
+       "mode": "chose",
+       "label": "LinkedIn People Search Scraper (memo23/linkedin-people-search)"
+      },
+      "runSync": {
+       "mode": "chose"
+      },
+      "actor_search_type": {
+       "label": "Apify Store Actors"
+      }
+     },
+     "parameters": {
+      "__IMTCONN__": {
+       "data": {
+        "scoped": "true",
+        "connection": "apify2"
+       },
+       "label": "Apify connection"
+      }
+     }
+    },
+    "designer": {
+     "x": 5100,
+     "y": 0
+    },
+    "parameters": [
+     {
+      "name": "__IMTCONN__",
+      "type": "account:apify2,apify",
+      "label": "Connection",
+      "required": true
+     }
+    ]
+   },
+   "parameters": {
+    "__IMTCONN__": 0
+   }
+  },
+  {
+   "id": 19,
+   "mapper": {
+    "type": "clean",
+    "limit": "100",
+    "format": "json",
+    "datasetId": "{{18.defaultDatasetId}}"
+   },
+   "module": "apify:fetchDatasetItems",
+   "version": 1,
+   "metadata": {
+    "designer": {
+     "x": 5400,
+     "y": 0
+    }
+   },
+   "parameters": {
+    "__IMTCONN__": 0
+   }
+  },
+  {
+   "id": 27,
+   "mapper": {
+    "value": "\"{{19.profileUrl}}\""
+   },
+   "module": "util:TextAggregator",
+   "version": 1,
+   "metadata": {
+    "designer": {
+     "x": 5670,
+     "y": 6
+    }
+   },
+   "parameters": {
+    "feeder": 19,
+    "rowSeparator": ","
+   }
+  },
+  {
+   "id": 28,
+   "mapper": {
+    "actorId": "LpVuK3Zozwuipa5bp",
+    "runSync": true,
+    "timeout": 120,
+    "actor_search_type": "store",
+    "inputBodyLpVuK3Zozwuipa5bp": "{\"queries\": [{{27.text}}], \"profileScraperMode\": \"Profile details no email ($4 per 1k)\"}"
+   },
+   "module": "apify:runActorNew",
+   "onerror": [
+    {
+     "id": 54,
+     "mapper": {},
+     "module": "builtin:Resume",
+     "version": 1,
+     "metadata": {
+      "designer": {
+       "x": 6091,
+       "y": 454
+      }
+     },
+     "parameters": {}
+    }
+   ],
+   "version": 1,
+   "metadata": {
+    "expect": [
+     {
+      "name": "actor_search_type",
+      "type": "select",
+      "label": "Search Actors from",
+      "required": true,
+      "validate": {
+       "enum": [
+        "user",
+        "store"
+       ]
+      }
+     },
+     {
+      "name": "runSync",
+      "type": "boolean",
+      "label": "Run synchronously",
+      "required": true
+     },
+     {
+      "name": "build",
+      "type": "text",
+      "label": "Build"
+     },
+     {
+      "name": "timeout",
+      "type": "uinteger",
+      "label": "Timeout"
+     },
+     {
+      "name": "memory",
+      "type": "select",
+      "label": "Memory",
+      "validate": {
+       "enum": [
+        128,
+        256,
+        512,
+        1024,
+        2048,
+        4096,
+        8192,
+        16384,
+        32768
+       ]
+      }
+     },
+     {
+      "name": "actorId",
+      "type": "select",
+      "label": "Actor",
+      "required": true
+     },
+     {
+      "name": "inputBodyLpVuK3Zozwuipa5bp",
+      "type": "text",
+      "label": "Input JSON",
+      "required": true
+     },
+     {
+      "name": "maxTotalChargeUsd",
+      "type": "number",
+      "label": "Maximum cost per run"
+     },
+     {
+      "name": "maxItems",
+      "type": "hidden",
+      "label": "Maximum charged results"
+     }
+    ],
+    "restore": {
+     "expect": {
+      "memory": {
+       "mode": "chose",
+       "label": "Empty"
+      },
+      "actorId": {
+       "mode": "chose",
+       "label": "LinkedIn Profile Scraper + Email ✅ No Cookies (harvestapi/linkedin-profile-scraper)"
+      },
+      "runSync": {
+       "mode": "chose"
+      },
+      "actor_search_type": {
+       "label": "Apify Store Actors"
+      }
+     },
+     "parameters": {
+      "__IMTCONN__": {
+       "data": {
+        "scoped": "true",
+        "connection": "apify2"
+       },
+       "label": "Apify connection"
+      }
+     }
+    },
+    "designer": {
+     "x": 5950,
+     "y": 8
+    },
+    "parameters": [
+     {
+      "name": "__IMTCONN__",
+      "type": "account:apify2,apify",
+      "label": "Connection",
+      "required": true
+     }
+    ]
+   },
+   "parameters": {
+    "__IMTCONN__": 0
+   }
+  },
+  {
+   "id": 29,
+   "mapper": {
+    "qs": [
+     {
+      "key": "clean",
+      "value": "true"
+     },
+     {
+      "key": "format",
+      "value": "json"
+     },
+     {
+      "key": "fields",
+      "value": "firstName,lastName,headline,linkedinUrl,publicIdentifier,location,about,currentPosition,experience,education,connectionsCount,followerCount,topSkills"
+     }
+    ],
+    "url": "/v2/datasets/{{28.defaultDatasetId}}/items",
+    "method": "GET",
+    "headers": []
+   },
+   "module": "apify:apifyApiCall",
+   "onerror": [
+    {
+     "id": 55,
+     "mapper": {},
+     "module": "builtin:Resume",
+     "version": 1,
+     "metadata": {
+      "designer": {
+       "x": 6381,
+       "y": 446
+      }
+     },
+     "parameters": {}
+    }
+   ],
+   "version": 1,
+   "metadata": {
+    "restore": {
+     "parameters": {
+      "__IMTCONN__": {
+       "data": {
+        "scoped": "true",
+        "connection": "apify2"
+       },
+       "label": "Apify connection"
+      }
+     }
+    },
+    "designer": {
+     "x": 6188,
+     "y": -10
+    },
+    "parameters": [
+     {
+      "name": "__IMTCONN__",
+      "type": "account:apify2,apify",
+      "label": "Connection",
+      "required": true
+     }
+    ]
+   },
+   "parameters": {
+    "__IMTCONN__": 0
+   }
+  },
+  {
+   "id": 30,
+   "mapper": {
+    "object": "{{29.body}}"
+   },
+   "module": "json:TransformToJSON",
+   "version": 1,
+   "metadata": {
+    "designer": {
+     "x": 6483,
+     "y": -20
+    }
+   },
+   "parameters": {}
+  },
+  {
+   "id": 21,
+   "mapper": {
+    "model": "gpt-5.4-mini",
+    "top_p": 1,
+    "select": "chat",
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are validating LinkedIn search results against a known prospect.\n\nYou receive:\n1) The PROSPECT we are trying to identify (name and company)\n2) LinkedIn CANDIDATES returned by a search, provided as a JSON array. Each array element is one candidate's full scraped profile. An empty array or null means no candidates were found.\n\nImportant: the prospect's company is a fuzzy affiliation guessed from calendar and email data. It is NOT necessarily their current employer. It may be a university, a past employer, or a side affiliation.\n\nTask:\n- Decide which candidate (if any) is the prospect\n- A candidate matches if their name aligns with the prospect's name AND the prospect's company aligns with ANY affiliation in their profile: current company (currentPosition), past employers (experience), education, or the about text\n- Grade confidence by where the company matched: current company = HIGH; education, past employer, or about = MEDIUM; name matches but no company alignment anywhere = LOW_CONFIDENCE_MATCH with an explanation\n- Always state WHERE the company affiliation matched\n- If several candidates match equally well on both name and affiliation: report the ambiguity rather than guessing\n- If no candidate matches: output \"MATCH: none\"\n\nFor a match, output:\nMATCH: <linkedinUrl>\nCONFIDENCE: HIGH / MEDIUM / LOW_CONFIDENCE_MATCH\nName: <full name>\nMatched on: <where the company affiliation was found, e.g. \"education: Example University\">\nHeadline: <headline>\nCurrent role: <current position and company>\nNetwork: <connections/followers if available>\nSummary: <2-3 factual sentences from their profile>\n\nNever fabricate. If a field is missing, write \"not available\"."
+     },
+     {
+      "role": "user",
+      "content": "=== PROSPECT ===\nName: {{3.name}}\nCompany: {{3.company_guess}}\n\n=== LINKEDIN CANDIDATES (JSON array) ===\n{{30.json}}"
+     }
+    ],
+    "max_tokens": 20480,
+    "temperature": 0.3,
+    "n_completions": 1,
+    "response_format": "text"
+   },
+   "module": "openai-gpt-3:CreateCompletion",
+   "version": 1,
+   "metadata": {
+    "designer": {
+     "x": 6770,
+     "y": -45
+    }
+   },
+   "parameters": {
+    "__IMTCONN__": 0
+   }
+  },
+  {
+   "id": 22,
+   "mapper": {
+    "value": "=== PARTICIPANT: {{3.name}} ({{3.email}}) ===\nEmail domain: {{3.email_domain}}\nCompany guess: {{3.company_guess}}\nCorporate email: {{3.is_corporate_email}}\n\n--- COMPANY RESEARCH ---\n{{17.result}}\n\n--- LINKEDIN VALIDATION ---\n{{21.result}}\n"
+   },
+   "module": "util:TextAggregator",
+   "version": 1,
+   "metadata": {
+    "designer": {
+     "x": 7037,
+     "y": -71
+    }
+   },
+   "parameters": {
+    "feeder": 3,
+    "rowSeparator": null
+   }
+  },
+  {
+   "id": 23,
+   "filter": {
+    "name": "Has research content",
+    "conditions": [
+     [
+      {
+       "a": "{{22.text}}",
+       "b": "",
+       "o": "text:notequal"
+      }
+     ]
+    ]
+   },
+   "mapper": {
+    "model": "gpt-5.6-luna",
+    "top_p": "1",
+    "select": "chat",
+    "messages": [
+     {
+      "role": "system",
+      "content": "You produce intelligence briefs for upcoming meetings. You receive research on meeting participants and produce one consolidated HTML brief.\n\nBrief archetype: consulting\nUser context: {{user_context}}\n\nBrief archetypes define the analytical frame:\n- sales: fit assessment, pain points relative to user's offering, buying signals, objection risks, deal openers\n- consulting: engagement signals, likely challenges, budget indicators, decision-making structure, positioning angles\n- investor: growth metrics, team assessment, market position, risk factors, due-diligence flags\n- general: neutral intelligence with no product/service angle, for networking or partnerships\n\nBrief structure (HTML format):\n\n<h1>Meeting Brief: [Meeting Title]</h1>\n<p>[Date] - [Number of participants researched]</p>\n\n<h2>At a Glance</h2>\n<ul>\n<li>[One-line summary per participant: name, role, company, single most useful fact]</li>\n<li>[One sentence connecting this meeting to the user's context]</li>\n</ul>\n\nFor each participant:\n<h2>[Participant Name] - [Title/Role]</h2>\n<h3>Person</h3>\n[Current role, LinkedIn headline, professional background (2-3 sentences), confidence tags]\n<h3>Company: [Company Name]</h3>\n[What they do, size, location, markets, key products/services, industry position, confidence tags]\n<h3>Conversation Starters</h3>\n[3 specific openers based on ACTUAL research findings, plus 1-2 connecting to user context]\n\n<hr>\n<p>Research depth: [FULL / LIMITED / MINIMAL]</p>\n<p>Research conducted [timestamp]. Sources: [URLs actually visited].</p>\n<p>Confidence key: checkmark = verified on source, ~ = inferred, hourglass = possibly stale, ? = not found</p>\n\nRules:\n- FULL = company website crawled + LinkedIn found and validated\n- LIMITED = one source missing\n- MINIMAL = web search snippets only\n- Every participant MUST appear in the brief, even if research returned nothing. Show their name, email, and what could not be found.\n- Conversation starters must be derived from actual research findings, NEVER fabricated\n- If research didn't find anything specific enough for a real opener, say so honestly\n- Surface discrepancies between sources rather than picking one\n- LinkedIn data is tagged as possibly stale (self-reported profiles)\n- Include source URLs for click-through verification\n- No em-dashes, no invented figures"
+     },
+     {
+      "role": "user",
+      "content": "Meeting: {{25.subject}}\nDate: {{25.start}}\n\n{{22.text}}"
+     }
+    ],
+    "max_tokens": "4096",
+    "temperature": "1",
+    "n_completions": "1",
+    "response_format": "text"
+   },
+   "module": "openai-gpt-3:CreateCompletion",
+   "version": 1,
+   "metadata": {
+    "expect": [
+     {
+      "name": "select",
+      "type": "select",
+      "label": "Select Method",
+      "required": true,
+      "validate": {
+       "enum": [
+        "chat",
+        "prompt"
+       ]
+      }
+     },
+     {
+      "name": "temperature",
+      "type": "number",
+      "label": "Temperature",
+      "validate": {
+       "max": 2,
+       "min": 0
+      }
+     },
+     {
+      "name": "top_p",
+      "type": "number",
+      "label": "Top P",
+      "validate": {
+       "max": 1,
+       "min": 0
+      }
+     },
+     {
+      "name": "n_completions",
+      "type": "number",
+      "label": "Number"
+     },
+     {
+      "name": "frequency_penalty",
+      "type": "number",
+      "label": "Frequency Penalty",
+      "validate": {
+       "max": 2,
+       "min": -2
+      }
+     },
+     {
+      "name": "presence_penalty",
+      "type": "number",
+      "label": "Presence Penalty",
+      "validate": {
+       "max": 2,
+       "min": -2
+      }
+     },
+     {
+      "name": "logit_bias",
+      "spec": {
+       "name": "value",
+       "spec": [
+        {
+         "name": "token",
+         "type": "text",
+         "label": "Token ID",
+         "required": true
+        },
+        {
+         "name": "probability",
+         "type": "number",
+         "label": "Probability",
+         "required": true,
+         "validate": {
+          "max": 100,
+          "min": -100
+         }
+        }
+       ],
+       "type": "collection",
+       "label": "Token Probability"
+      },
+      "type": "array",
+      "label": "Token Probability"
+     },
+     {
+      "name": "seed",
+      "type": "integer",
+      "label": "Seed"
+     },
+     {
+      "name": "tool_choice",
+      "type": "select",
+      "label": "Tool Choice",
+      "validate": {
+       "enum": [
+        "none",
+        "auto",
+        "required"
+       ]
+      }
+     },
+     {
+      "name": "stop",
+      "spec": {
+       "name": "value",
+       "type": "text",
+       "label": "Stop Sequence"
+      },
+      "type": "array",
+      "label": "Stop Sequences",
+      "validate": {
+       "maxItems": 4
+      }
+     },
+     {
+      "name": "additionalParameters",
+      "spec": {
+       "name": "value",
+       "spec": [
+        {
+         "name": "key",
+         "type": "text",
+         "label": "Parameter Name",
+         "required": true
+        },
+        {
+         "name": "type",
+         "type": "select",
+         "label": "Input Type",
+         "options": [
+          {
+           "label": "Text",
+           "value": "text",
+           "nested": [
+            {
+             "name": "value",
+             "type": "text",
+             "label": "Parameter Value"
+            }
+           ],
+           "default": true
+          },
+          {
+           "label": "Number",
+           "value": "number",
+           "nested": [
+            {
+             "name": "value",
+             "type": "number",
+             "label": "Parameter Value"
+            }
+           ]
+          },
+          {
+           "label": "Boolean",
+           "value": "boolean",
+           "nested": [
+            {
+             "name": "value",
+             "type": "boolean",
+             "label": "Parameter Value"
+            }
+           ]
+          },
+          {
+           "label": "Date",
+           "value": "date",
+           "nested": [
+            {
+             "name": "value",
+             "type": "date",
+             "label": "Parameter Value"
+            }
+           ]
+          },
+          {
+           "label": "Any",
+           "value": "any",
+           "nested": [
+            {
+             "name": "value",
+             "type": "any",
+             "label": "Parameter Value"
+            }
+           ]
+          }
+         ]
+        }
+       ],
+       "type": "collection",
+       "label": "Input Parameter"
+      },
+      "type": "array",
+      "label": "Other Input Parameters"
+     },
+     {
+      "name": "model",
+      "type": "select",
+      "label": "Model",
+      "required": true
+     },
+     {
+      "name": "max_tokens",
+      "type": "uinteger",
+      "label": "Max Output Tokens"
+     },
+     {
+      "name": "messages",
+      "spec": {
+       "name": "value",
+       "spec": [
+        {
+         "name": "role",
+         "type": "select",
+         "label": "Role",
+         "options": {
+          "store": [
+           {
+            "label": "User",
+            "value": "user",
+            "nested": [
+             {
+              "help": "Text content of the message on behalf of the selected __Role__.",
+              "name": "content",
+              "type": "text",
+              "label": "Text Content"
+             }
+            ],
+            "default": true
+           },
+           {
+            "label": "Assistant",
+            "value": "assistant",
+            "nested": [
+             {
+              "help": "Text content of the message on behalf of the selected __Role__.",
+              "name": "content",
+              "type": "text",
+              "label": "Text Content"
+             },
+             {
+              "mode": "edit",
+              "name": "tool_calls",
+              "spec": {
+               "spec": [
+                {
+                 "name": "type",
+                 "type": "hidden",
+                 "default": "function"
+                },
+                {
+                 "help": "Map this directly from the output of a previous **Create a Completion** module. Look for `Choices[]: Message.Tool Calls[]: ID`.",
+                 "name": "id",
+                 "type": "text",
+                 "label": "Tool call ID"
+                },
+                {
+                 "name": "function",
+                 "spec": [
+                  {
+                   "help": "The name of the function previously called.",
+                   "name": "name",
+                   "type": "text",
+                   "label": "Name",
+                   "required": true
+                  },
+                  {
+                   "help": "The arguments previously output by the AI.",
+                   "name": "arguments",
+                   "type": "text",
+                   "label": "Arguments",
+                   "required": true
+                  }
+                 ],
+                 "type": "collection",
+                 "label": "Function"
+                }
+               ],
+               "type": "collection",
+               "label": "Tool Call"
+              },
+              "type": "array",
+              "label": "Tool Calls",
+              "labels": {
+               "add": "Add tool call"
+              },
+              "mappable": {
+               "help": "You can map the entire `Choices[]: Message.Tool Calls` array from a previous Create a Completion module here."
+              }
+             }
+            ]
+           },
+           {
+            "label": "Developer / System",
+            "value": "system",
+            "nested": [
+             {
+              "help": "Text content of the message on behalf of the selected __Role__.",
+              "name": "content",
+              "type": "text",
+              "label": "Text Content"
+             }
+            ]
+           },
+           {
+            "label": "Tool",
+            "value": "tool",
+            "nested": [
+             {
+              "help": "The return of the function. This role should only be used when you have processed a previous function call and want to send the output of the function execution back to the AI.",
+              "name": "content",
+              "type": "text",
+              "label": "Text Content",
+              "required": true
+             },
+             {
+              "help": "Map this directly from the output of a previous **Create a Completion** module. Look for `Choices[]: Message.Tool Calls[]: ID`.",
+              "name": "tool_call_id",
+              "type": "text",
+              "label": "Tool Call ID.",
+              "required": true
+             }
+            ]
+           }
+          ]
+         },
+         "required": true
+        }
+       ],
+       "type": "collection",
+       "label": "Message"
+      },
+      "type": "array",
+      "label": "Messages",
+      "required": true
+     },
+     {
+      "name": "response_format",
+      "type": "select",
+      "label": "Response Format",
+      "validate": {
+       "enum": [
+        "text",
+        "json_object"
+       ]
+      }
+     },
+     {
+      "name": "reasoning_effort",
+      "type": "select",
+      "label": "Reasoning Effort",
+      "validate": {
+       "enum": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ]
+      }
+     }
+    ],
+    "restore": {
+     "expect": {
+      "stop": {
+       "mode": "chose"
+      },
+      "model": {
+       "mode": "chose",
+       "label": "gpt-5.6-luna (system)Fastest and most cost-efficient model for high-volume workloads"
+      },
+      "select": {
+       "label": "Create a Chat Completion (GPT and o1 models)"
+      },
+      "messages": {
+       "mode": "chose",
+       "items": [
+        {
+         "role": {
+          "mode": "chose",
+          "label": "Developer / System"
+         }
+        },
+        {
+         "role": {
+          "mode": "chose",
+          "label": "User"
+         }
+        }
+       ]
+      },
+      "logit_bias": {
+       "mode": "chose"
+      },
+      "tool_choice": {
+       "mode": "chose",
+       "label": "Empty"
+      },
+      "response_format": {
+       "mode": "chose",
+       "label": "Text"
+      },
+      "reasoning_effort": {
+       "mode": "chose",
+       "label": "Empty"
+      },
+      "additionalParameters": {
+       "mode": "chose"
+      }
+     },
+     "parameters": {
+      "__IMTCONN__": {
+       "data": {
+        "scoped": "true",
+        "connection": "openai-gpt-3"
+       },
+       "label": "OpenAI connection"
+      }
+     }
+    },
+    "designer": {
+     "x": 7448,
+     "y": -71
+    },
+    "interface": [
+     {
+      "name": "result",
+      "type": "any",
+      "label": "Result"
+     },
+     {
+      "name": "id",
+      "type": "text",
+      "label": "ID"
+     },
+     {
+      "name": "object",
+      "type": "text",
+      "label": "Object"
+     },
+     {
+      "name": "created",
+      "type": "date",
+      "label": "Created"
+     },
+     {
+      "name": "model",
+      "type": "text",
+      "label": "Model"
+     },
+     {
+      "name": "choices",
+      "spec": [
+       {
+        "name": "text",
+        "type": "text",
+        "label": "Text"
+       },
+       {
+        "name": "index",
+        "type": "number",
+        "label": "Index"
+       },
+       {
+        "name": "logprobs",
+        "type": "text",
+        "label": "Log Probs"
+       },
+       {
+        "name": "finish_reason",
+        "type": "text",
+        "label": "Finish Reason"
+       },
+       {
+        "name": "message",
+        "spec": [
+         {
+          "name": "role",
+          "type": "text",
+          "label": "Role"
+         },
+         {
+          "name": "content",
+          "type": "text",
+          "label": "Content"
+         },
+         {
+          "name": "tool_calls",
+          "spec": [
+           {
+            "name": "id",
+            "type": "text",
+            "label": "ID"
+           },
+           {
+            "name": "type",
+            "type": "text",
+            "label": "Type"
+           },
+           {
+            "name": "function",
+            "spec": [
+             {
+              "name": "name",
+              "type": "text",
+              "label": "Name"
+             },
+             {
+              "name": "arguments",
+              "type": "text",
+              "label": "Arguments"
+             }
+            ],
+            "type": "collection",
+            "label": "Function"
+           }
+          ],
+          "type": "array",
+          "label": "Tool Calls"
+         },
+         {
+          "name": "refusal",
+          "type": "text",
+          "label": "Refusal"
+         },
+         {
+          "name": "annotations",
+          "spec": [
+           {
+            "name": "type",
+            "type": "text",
+            "label": "Type"
+           },
+           {
+            "name": "url_citation",
+            "spec": [
+             {
+              "name": "end_index",
+              "type": "number",
+              "label": "End Index"
+             },
+             {
+              "name": "start_index",
+              "type": "number",
+              "label": "Start Index"
+             },
+             {
+              "name": "title",
+              "type": "text",
+              "label": "Title"
+             },
+             {
+              "name": "url",
+              "type": "text",
+              "label": "URL"
+             }
+            ],
+            "type": "collection",
+            "label": "URL Citation"
+           }
+          ],
+          "type": "array",
+          "label": "Annotations"
+         }
+        ],
+        "type": "collection",
+        "label": "Message"
+       }
+      ],
+      "type": "array",
+      "label": "Choices"
+     },
+     {
+      "name": "usage",
+      "spec": [
+       {
+        "name": "prompt_tokens",
+        "type": "number",
+        "label": "Prompt Tokens"
+       },
+       {
+        "name": "completion_tokens",
+        "type": "text",
+        "label": "Completion Tokens"
+       },
+       {
+        "name": "total_tokens",
+        "type": "number",
+        "label": "Total Tokens"
+       },
+       {
+        "name": "prompt_tokens_details",
+        "spec": [
+         {
+          "name": "cached_tokens",
+          "type": "uinteger",
+          "label": "Cached Tokens"
+         },
+         {
+          "name": "text_tokens",
+          "type": "uinteger",
+          "label": "Text Tokens"
+         },
+         {
+          "name": "image_tokens",
+          "type": "uinteger",
+          "label": "Image Tokens"
+         },
+         {
+          "name": "audio_tokens",
+          "type": "uinteger",
+          "label": "Audio Tokens"
+         }
+        ],
+        "type": "collection",
+        "label": "Prompt Tokens Details"
+       },
+       {
+        "name": "completion_tokens_details",
+        "spec": [
+         {
+          "name": "reasoning_tokens",
+          "type": "uinteger",
+          "label": "Reasoning Tokens"
+         },
+         {
+          "name": "text_tokens",
+          "type": "uinteger",
+          "label": "Text Tokens"
+         },
+         {
+          "name": "audio_tokens",
+          "type": "uinteger",
+          "label": "Audio Tokens"
+         },
+         {
+          "name": "accepted_prediction_tokens",
+          "type": "uinteger",
+          "label": "Accepted Prediction Tokens"
+         },
+         {
+          "name": "rejected_prediction_tokens",
+          "type": "uinteger",
+          "label": "Rejected Prediction Tokens"
+         }
+        ],
+        "type": "collection",
+        "label": "Completion Tokens Details"
+       }
+      ],
+      "type": "collection",
+      "label": "Usage"
+     },
+     {
+      "name": "service_tier",
+      "type": "text",
+      "label": "Service Tier"
+     },
+     {
+      "name": "system_fingerprint",
+      "type": "text",
+      "label": "System Fingerprint"
+     }
+    ],
+    "parameters": [
+     {
+      "name": "__IMTCONN__",
+      "type": "account:openai-gpt-3",
+      "label": "Connection",
+      "required": true
+     }
+    ]
+   },
+   "parameters": {
+    "__IMTCONN__": 0
+   }
+  },
+  {
+   "id": 26,
+   "mapper": {
+    "value": "{{23.result}}"
+   },
+   "module": "util:TextAggregator",
+   "version": 1,
+   "metadata": {
+    "designer": {
+     "x": 7744,
+     "y": -69
+    }
+   },
+   "parameters": {
+    "feeder": 25,
+    "rowSeparator": "\n<hr style=\"border: 3px solid #333; margin: 40px 0;\">\n"
+   }
+  },
+  {
+   "id": 24,
+   "filter": {
+    "name": "Has brief content",
+    "conditions": [
+     [
+      {
+       "a": "{{26.text}}",
+       "b": "",
+       "o": "text:notequal"
+      }
+     ]
+    ]
+   },
+   "mapper": {
+    "content": "{{26.text}}",
+    "subject": "Meeting Briefs: {{formatDate(now; \"YYYY-MM-DD\")}}",
+    "contentType": "html",
+    "toRecipients": [
+     {
+      "address": "{{email_to}}"
+     }
+    ],
+    "singleValueExtendedProperties": {}
+   },
+   "module": "microsoft-email:createAndSendAMessage",
+   "version": 2,
+   "metadata": {
+    "expect": [
+     {
+      "name": "toRecipients",
+      "spec": [
+       {
+        "name": "address",
+        "type": "email",
+        "label": "Email Address",
+        "required": true
+       },
+       {
+        "name": "name",
+        "type": "text",
+        "label": "Name"
+       }
+      ],
+      "type": "array",
+      "label": "To Recipients",
+      "required": true
+     },
+     {
+      "name": "subject",
+      "type": "text",
+      "label": "Subject",
+      "required": true
+     },
+     {
+      "name": "content",
+      "type": "text",
+      "label": "Body Content",
+      "required": true
+     },
+     {
+      "name": "attachments",
+      "spec": [
+       {
+        "name": "filename",
+        "type": "filename",
+        "label": "File Name",
+        "required": true,
+        "semantic": "file:name"
+       },
+       {
+        "name": "data",
+        "type": "buffer",
+        "label": "Data",
+        "required": true,
+        "semantic": "file:data"
+       }
+      ],
+      "type": "array",
+      "label": "Attachments"
+     },
+     {
+      "name": "replyTo",
+      "spec": [
+       {
+        "name": "address",
+        "type": "email",
+        "label": "Email Address",
+        "required": true
+       },
+       {
+        "name": "name",
+        "type": "text",
+        "label": "Name"
+       }
+      ],
+      "type": "array",
+      "label": "Reply To"
+     },
+     {
+      "name": "from",
+      "spec": [
+       {
+        "name": "address",
+        "type": "email",
+        "label": "Email Address",
+        "required": true
+       },
+       {
+        "name": "name",
+        "type": "text",
+        "label": "Name"
+       }
+      ],
+      "type": "array",
+      "label": "From",
+      "validate": {
+       "maxItems": 1
+      }
+     },
+     {
+      "name": "ccRecipients",
+      "spec": [
+       {
+        "name": "address",
+        "type": "email",
+        "label": "Email Address",
+        "required": true
+       },
+       {
+        "name": "name",
+        "type": "text",
+        "label": "Name"
+       }
+      ],
+      "type": "array",
+      "label": "CC Recipients"
+     },
+     {
+      "name": "bccRecipients",
+      "spec": [
+       {
+        "name": "address",
+        "type": "email",
+        "label": "Email Address",
+        "required": true
+       },
+       {
+        "name": "name",
+        "type": "text",
+        "label": "Name"
+       }
+      ],
+      "type": "array",
+      "label": "Bcc Recipients"
+     },
+     {
+      "name": "importance",
+      "type": "select",
+      "label": "Importance",
+      "validate": {
+       "enum": [
+        "Low",
+        "Normal",
+        "High"
+       ]
+      }
+     },
+     {
+      "name": "internetMessageHeaders",
+      "spec": [
+       {
+        "name": "name",
+        "type": "text",
+        "label": "Name",
+        "required": true
+       },
+       {
+        "name": "value",
+        "type": "text",
+        "label": "Value",
+        "required": true
+       }
+      ],
+      "type": "array",
+      "label": "Internet Message Headers"
+     },
+     {
+      "name": "contentType",
+      "type": "select",
+      "label": "Body Content Type",
+      "required": true,
+      "validate": {
+       "enum": [
+        "html",
+        "text"
+       ]
+      }
+     },
+     {
+      "name": "singleValueExtendedProperties",
+      "spec": [
+       {
+        "name": "sensitivityLabel",
+        "type": "text",
+        "label": "Sensitivity Label"
+       }
+      ],
+      "type": "collection",
+      "label": "Extended MAPI Properties"
+     }
+    ],
+    "restore": {
+     "expect": {
+      "from": {
+       "mode": "chose"
+      },
+      "replyTo": {
+       "mode": "chose"
+      },
+      "importance": {
+       "mode": "chose",
+       "label": "Empty"
+      },
+      "attachments": {
+       "mode": "chose"
+      },
+      "contentType": {
+       "mode": "chose",
+       "label": "HTML"
+      },
+      "ccRecipients": {
+       "mode": "chose"
+      },
+      "toRecipients": {
+       "mode": "chose",
+       "items": [
+        null
+       ]
+      },
+      "bccRecipients": {
+       "mode": "chose"
+      },
+      "internetMessageHeaders": {
+       "mode": "chose"
+      }
+     },
+     "parameters": {
+      "__IMTCONN__": {
+       "data": {
+        "scoped": "true",
+        "connection": "azure"
+       },
+       "label": "Microsoft connection"
+      }
+     }
+    },
+    "designer": {
+     "x": 8176,
+     "y": -72
+    },
+    "parameters": [
+     {
+      "name": "__IMTCONN__",
+      "type": "account:azure",
+      "label": "Connection",
+      "required": true
+     }
+    ]
+   },
+   "parameters": {
+    "__IMTCONN__": 0
+   }
+  }
+ ],
+ "name": "Meeting Intel",
+ "metadata": {
+  "instant": false,
+  "version": 1,
+  "designer": {
+   "orphans": []
+  },
+  "scenario": {
+   "dlq": false,
+   "slots": null,
+   "dataloss": false,
+   "maxErrors": 3,
+   "autoCommit": true,
+   "roundtrips": 1,
+   "sequential": false,
+   "confidential": false,
+   "freshVariables": false,
+   "autoCommitTriggerLast": true
+  }
+ },
+ "scheduling": {
+  "type": "on-demand"
+ },
+ "interface": {
+  "input": [],
+  "output": []
+ }
+}

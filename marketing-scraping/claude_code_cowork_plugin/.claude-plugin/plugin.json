@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "marketing-scraping",
+  "version": "1.2.3",
+  "description": "Market-research tools you run on your own Apify account for when you want: App Store or Play Store reviews for a product, Trustpilot/Reddit/G2/Capterra reviews of a competitor, competitor ad analysis across Meta/Google/LinkedIn, or real keyword volume and SERP data. Each tool produces a numbered report where every claim is counted in code before any LLM runs.",
+  "author": {
+    "name": "InnoMaker Partners"
+  },
+  "license": "MIT",
+  "keywords": [
+    "marketing",
+    "market-research",
+    "competitor-analysis",
+    "ads",
+    "reviews",
+    "seo",
+    "keyword-research",
+    "apify"
+  ]
+}

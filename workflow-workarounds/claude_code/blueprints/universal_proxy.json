@@ -1,0 +1,234 @@
+{
+  "name": "Claude Workflow Proxy",
+  "flow": [
+    {
+      "id": 1,
+      "module": "gateway:CustomWebHook",
+      "version": 1,
+      "parameters": {
+        "hook": null,
+        "maxResults": 1
+      },
+      "mapper": {},
+      "metadata": {
+        "designer": {"x": -400, "y": 0},
+        "restore": {
+          "hook": {}
+        }
+      }
+    },
+    {
+      "id": 2,
+      "module": "builtin:BasicRouter",
+      "version": 1,
+      "parameters": {},
+      "mapper": {},
+      "metadata": {
+        "designer": {"x": -200, "y": 0}
+      },
+      "routes": [
+        {
+          "flow": [
+            {
+              "id": 3,
+              "module": "builtin:BasicRouter",
+              "version": 1,
+              "parameters": {},
+              "mapper": {},
+              "filter": {
+                "name": "Share token valid",
+                "conditions": [
+                  [
+                    {
+                      "a": "{{1.share_token}}",
+                      "b": "{{var.SHARE_TOKEN}}",
+                      "o": "text:equal"
+                    }
+                  ]
+                ]
+              },
+              "metadata": {
+                "designer": {"x": 0, "y": -100}
+              },
+              "routes": [
+                {
+                  "flow": [
+                    {
+                      "id": 5,
+                      "module": "http:MakeRequest",
+                      "version": 4,
+                      "parameters": {
+                        "authenticationType": "oAuth",
+                        "oAuthAccount": null
+                      },
+                      "filter": {
+                        "name": "Platform is microsoft",
+                        "conditions": [
+                          [
+                            {
+                              "a": "{{1.platform}}",
+                              "b": "microsoft",
+                              "o": "text:equal"
+                            }
+                          ]
+                        ]
+                      },
+                      "mapper": {
+                        "url": "https://graph.microsoft.com/v1.0{{1.endpoint}}",
+                        "method": "{{1.method}}",
+                        "parseResponse": true,
+                        "stopOnHttpError": false
+                      },
+                      "metadata": {
+                        "designer": {"x": 200, "y": -250}
+                      }
+                    },
+                    {
+                      "id": 7,
+                      "module": "gateway:WebhookRespond",
+                      "version": 1,
+                      "parameters": {},
+                      "mapper": {
+                        "status": "{{5.statusCode}}",
+                        "body": "{{5.data}}"
+                      },
+                      "metadata": {
+                        "designer": {"x": 400, "y": -250}
+                      }
+                    }
+                  ]
+                },
+                {
+                  "flow": [
+                    {
+                      "id": 6,
+                      "module": "http:MakeRequest",
+                      "version": 4,
+                      "parameters": {
+                        "authenticationType": "oAuth",
+                        "oAuthAccount": null
+                      },
+                      "filter": {
+                        "name": "Platform is meta",
+                        "conditions": [
+                          [
+                            {
+                              "a": "{{1.platform}}",
+                              "b": "meta",
+                              "o": "text:equal"
+                            }
+                          ]
+                        ]
+                      },
+                      "mapper": {
+                        "url": "https://graph.facebook.com/v26.0{{1.endpoint}}",
+                        "method": "{{1.method}}",
+                        "parseResponse": true,
+                        "stopOnHttpError": false
+                      },
+                      "metadata": {
+                        "designer": {"x": 200, "y": 50}
+                      }
+                    },
+                    {
+                      "id": 8,
+                      "module": "gateway:WebhookRespond",
+                      "version": 1,
+                      "parameters": {},
+                      "mapper": {
+                        "status": "{{6.statusCode}}",
+                        "body": "{{6.data}}"
+                      },
+                      "metadata": {
+                        "designer": {"x": 400, "y": 50}
+                      }
+                    }
+                  ]
+                },
+                {
+                  "flow": [
+                    {
+                      "id": 9,
+                      "module": "gateway:WebhookRespond",
+                      "version": 1,
+                      "parameters": {},
+                      "filter": {
+                        "name": "Platform is test",
+                        "conditions": [
+                          [
+                            {
+                              "a": "{{1.platform}}",
+                              "b": "test",
+                              "o": "text:equal"
+                            }
+                          ]
+                        ]
+                      },
+                      "mapper": {
+                        "status": 200,
+                        "body": {"status": "ok"}
+                      },
+                      "metadata": {
+                        "designer": {"x": 200, "y": 350}
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "flow": [
+            {
+              "id": 4,
+              "module": "gateway:WebhookRespond",
+              "version": 1,
+              "parameters": {},
+              "filter": {
+                "name": "Share token invalid",
+                "conditions": [
+                  [
+                    {
+                      "a": "{{1.share_token}}",
+                      "b": "{{var.SHARE_TOKEN}}",
+                      "o": "text:notequal"
+                    }
+                  ]
+                ]
+              },
+              "mapper": {
+                "status": 401,
+                "body": {
+                  "error": "unauthorized",
+                  "detail": "share_token mismatch"
+                }
+              },
+              "metadata": {
+                "designer": {"x": 0, "y": 150}
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "metadata": {
+    "instant": true,
+    "version": 1,
+    "scenario": {
+      "roundtrips": 1,
+      "maxErrors": 3,
+      "autoCommit": true,
+      "autoCommitTriggerLast": true,
+      "sequential": false,
+      "confidential": false,
+      "dataloss": false,
+      "dlq": false,
+      "freshVariables": false
+    },
+    "designer": {
+      "orphans": []
+    }
+  }
+}

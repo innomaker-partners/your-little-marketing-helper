@@ -1,0 +1,33 @@
+{
+  "_comment": "Baseline selector patterns for browser automation. Some entries are English-only starting points; others (such as Outlook) carry multi-language variants. All values are illustrative: verify against the live page before using in a SEL table.",
+  "linkedin": {
+    "analytics_nav": "a[href*=\"/analytics/\"]",
+    "profile_urls": "a[href*=\"/in/\"]",
+    "_post_engagement_anti_pattern": "ANTI-PATTERN: these class-keyword selectors return [] on the live LinkedIn analytics page - class names are content-hash-obfuscated (observed: '_04113bfd f9d54e6d'). Do not use. See REFERENCE.md worked examples, LinkedIn Analytics anti-pattern section.",
+    "post_engagement": "[class*=\"metric\"], [class*=\"analytics\"], [class*=\"stat\"]",
+    "scroll_container": "main",
+    "captcha_indicators": [
+      "#captcha-challenge",
+      ".challenge-dialog",
+      "[data-test-id=\"challenge\"]",
+      "iframe[src*=\"captcha\"]"
+    ]
+  },
+  "outlook_office": {
+    "new_message": {
+      "en": "button[aria-label=\"New mail\"]",
+      "de": "button[aria-label=\"Neue E-Mail\"]",
+      "fr": "button[aria-label=\"Nouveau message\"]",
+      "es": "button[aria-label=\"Nuevo mensaje\"]",
+      "it": "button[aria-label=\"Nuovo messaggio\"]",
+      "nl": "button[aria-label=\"Nieuwe e-mail\"]",
+      "hu": "button[aria-label=\"Új üzenet\"], button[aria-label=\"Új\"]",
+      "pl": "button[aria-label=\"Nowa wiadomość\"]",
+      "_fallback": "button[aria-label]"
+    },
+    "to_field": "div[contenteditable=\"true\"][aria-label*=\"To\"], div[contenteditable=\"true\"][aria-label*=\"Címzett\"], div[contenteditable=\"true\"][aria-label*=\"An\"], div[contenteditable=\"true\"][aria-label*=\"Para\"], div[contenteditable=\"true\"][aria-label*=\"Aan\"]",
+    "subject_field": "input[aria-label*=\"Subject\"], input[aria-label*=\"Tárgy\"], input[aria-label*=\"Betreff\"], input[aria-label*=\"Objet\"], input[aria-label*=\"Asunto\"], input[aria-label*=\"Assunto\"], input[aria-label*=\"Oggetto\"], input[aria-label*=\"Onderwerp\"], input[aria-label*=\"Temat\"]",
+    "send_button_DO_NOT_CLICK": "button[aria-label*=\"Send\"], button[aria-label*=\"Küldés\"], button[aria-label*=\"Senden\"], button[aria-label*=\"Envoyer\"], button[aria-label*=\"Enviar\"], button[aria-label*=\"Invia\"], button[aria-label*=\"Verzenden\"], button[aria-label*=\"Wyślij\"]",
+    "discard_button_DO_NOT_CLICK": "button[aria-label*=\"Discard\"], button[aria-label*=\"Elvetés\"], button[aria-label*=\"Verwerfen\"], button[aria-label*=\"Ignorer\"], button[aria-label*=\"Descartar\"], button[aria-label*=\"Elimina\"], button[aria-label*=\"Negeren\"], button[aria-label*=\"Odrzuć\"]"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "marketing-scraping-local",
+  "owner": { "name": "InnoMaker Partners" },
+  "metadata": {
+    "description": "Local single-plugin marketplace for the Marketing-scraping plugin. Add this folder as a marketplace, then install marketing-scraping from it."
+  },
+  "plugins": [
+    {
+      "name": "marketing-scraping",
+      "source": "./",
+      "description": "Competitor ad-intelligence, customer pain-and-messaging mining, and search/SEO intelligence. You bring your own Apify account and your own Claude Code CLI; every report number is counted in code before any LLM runs."
+    }
+  ]
+}

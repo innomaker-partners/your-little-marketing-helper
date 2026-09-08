@@ -1,0 +1,14 @@
+{
+  "name": "content-at-scale-local",
+  "owner": { "name": "InnoMaker Partners" },
+  "metadata": {
+    "description": "Local single-plugin marketplace for the Content at Scale plugin. Add this folder as a marketplace, then install content-at-scale from it."
+  },
+  "plugins": [
+    {
+      "name": "content-at-scale",
+      "source": "./",
+      "description": "Produce content at scale with strict quality control: grouped runs, provenance-labelled context, deterministic gates, adversarial fact-checking."
+    }
+  ]
+}

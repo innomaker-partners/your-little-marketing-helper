@@ -1,0 +1,9 @@
+{
+  "_comment": "Copy this file to your subject's run directory as config.json and fill in the real values. The PhantomBuster API key is NOT here; it comes from the PHANTOMBUSTER_API_KEY environment variable (see scripts/.env.example). This file holds per-subject identity: which phantoms to run, how to name their outputs, and an optional label for the notification message.",
+  "subject_label": "ACME CEO",
+  "collector_id": "YOUR_COLLECTOR_AGENT_ID",
+  "scraper_id": "YOUR_SCRAPER_AGENT_ID",
+  "csv_name": "followers - {date}",
+  "enrich_list_name": "linkedin-follower-tracker enrichment {date} {time}",
+  "adds_per_launch": 500
+}

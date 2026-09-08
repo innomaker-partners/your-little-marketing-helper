@@ -1,0 +1,11 @@
+{
+  "user_domains": ["example.com"],
+  "brief_archetype": "sales",
+  "user_context": "I sell [product/service] to [target companies]. I care about [what makes a meeting interesting].",
+  "max_participants_per_meeting": 3,
+  "output": {
+    "markdown_path": "~/meeting-briefs",
+    "email_enabled": false,
+    "email_to": ""
+  }
+}

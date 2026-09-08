@@ -1,0 +1,14 @@
+{
+  "name": "meeting-intel-local",
+  "owner": { "name": "InnoMaker Partners" },
+  "metadata": {
+    "description": "Local single-plugin marketplace for the Meeting Intel plugin. Add this folder as a marketplace, then install meeting-intel from it."
+  },
+  "plugins": [
+    {
+      "name": "meeting-intel",
+      "source": "./",
+      "description": "Research external meeting participants and produce intelligence briefs before your calls."
+    }
+  ]
+}

@@ -1,0 +1,3132 @@
+{
+  "name": "LinkedIn Follower Tracker",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "get",
+        "agentId": "YOUR_FOLLOWER_COLLECTOR_AGENT_ID"
+      },
+      "type": "n8n-nodes-base.phantombuster",
+      "typeVersion": 1,
+      "position": [
+        -240,
+        96
+      ],
+      "id": "d67b360a-f790-4949-be78-3e4865531228",
+      "name": "Get an agent",
+      "retryOnFail": true,
+      "credentials": {
+        "phantombusterApi": {
+          "name": "Your PhantomBuster account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "agentId": "={{ $json.id }}",
+        "jsonParameters": true,
+        "additionalFields": {
+          "argumentsJson": "={\n\t\"sessionCookie\": \"YOUR_LINKEDIN_SESSION_COOKIE\",\n\t\"userAgent\": \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36\",\n\t\"enrichLeadsWithAdditionalInformation\": true,\n\t\"csvName\": \"{{ 'Followers - ' + $now.toFormat('yyyy-MM-dd') }}\"\n}",
+          "manualLaunch": true
+        }
+      },
+      "type": "n8n-nodes-base.phantombuster",
+      "typeVersion": 1,
+      "position": [
+        -32,
+        96
+      ],
+      "id": "945c346b-86e4-4499-9e98-d11031a4abd7",
+      "name": "Add an agent to the launch queue",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "phantombusterApi": {
+          "name": "Your PhantomBuster account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "getOutput",
+        "agentId": "={{ $('Get an agent').item.json.id }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.phantombuster",
+      "typeVersion": 1,
+      "position": [
+        368,
+        96
+      ],
+      "id": "a1aa42a9-ebd2-4f24-9ea2-0b8a2355c3a1",
+      "name": "Get the output of an agent",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "phantombusterApi": {
+          "name": "Your PhantomBuster account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 70,
+        "unit": "minutes"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        176,
+        96
+      ],
+      "id": "e68eb12a-6495-4ebe-8eec-a576d7335cbb",
+      "name": "Wait",
+      "webhookId": "7fd02e39-3df9-4500-88b0-f201ccdd17bb"
+    },
+    {
+      "parameters": {
+        "jsCode": "const allItems = $input.all();\nlet followers = [];\n\nif (allItems.length > 1) {\n  // Phantombuster returned one item per follower — collect them all\n  followers = allItems.map(item => item.json);\n} else {\n  // Single item — try to extract followers from structured fields\n  const agentOutput = allItems[0].json;\n\n  // Path 1: top-level resultObject as JSON string\n  if (!followers.length && agentOutput.resultObject) {\n    try {\n      const parsed = JSON.parse(agentOutput.resultObject);\n      if (Array.isArray(parsed)) followers = parsed;\n    } catch(e) {}\n  }\n\n  // Path 2: nested data.resultObject\n  if (!followers.length && agentOutput.data?.resultObject) {\n    try {\n      const raw = agentOutput.data.resultObject;\n      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;\n      if (Array.isArray(parsed)) followers = parsed;\n    } catch(e) {}\n  }\n\n  // Path 3: top-level result array\n  if (!followers.length && Array.isArray(agentOutput.result)) {\n    followers = agentOutput.result;\n  }\n\n  // Path 4: data.result\n  if (!followers.length && Array.isArray(agentOutput.data?.result)) {\n    followers = agentOutput.data.result;\n  }\n\n  // Debug fallback\n  if (!followers.length) {\n    return [{ json: { followers: [], _debug_keys: Object.keys(agentOutput), _debug_sample: agentOutput } }];\n  }\n}\n\nreturn [{ json: { followers } }];"
+      },
+      "id": "e941c0b7-0012-4b1b-807e-cf618d95b19e",
+      "name": "Parse Phantom Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1088,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Master",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "d0639ed5-e4b5-4903-911b-58f0896e6ae2",
+      "name": "Read Master",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1280,
+        96
+      ],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "Your Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const masterItems = $input.all();\n\n// Normalise: lowercase + strip trailing slash\nconst normalise = url => (url || '').trim().toLowerCase().replace(/\\/+$/, '');\n\nconst masterUrls = new Set(\n  masterItems.map(item => normalise(item.json.profileUrl)).filter(Boolean)\n);\n\nconst phantomData = $('Parse Phantom Output').first().json.followers;\nconst newFollowers = phantomData.filter(f => !masterUrls.has(normalise(f.profileLink)));\n\n// Surface counts as first item for easy verification, then the actual new followers\nconsole.log(`Master URLs loaded: ${masterUrls.size}`);\nconsole.log(`Phantom followers: ${phantomData.length}`);\nconsole.log(`New followers found: ${newFollowers.length}`);\nconsole.log('masterUrls size:', masterUrls.size);\nconsole.log('first 3 master URLs:', [...masterUrls].slice(0,3));\nconsole.log('first 3 phantom profileLinks:', phantomData.slice(0,3).map(f => f.profileLink));\nconsole.log('first phantom match test:', masterUrls.has(normalise(phantomData[0]?.profileLink)));\n\nreturn newFollowers.map(f => ({ json: f }));"
+      },
+      "id": "4812c080-d1e9-49c2-968f-b911d8b915b2",
+      "name": "Find New Followers",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1488,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "title": "={{ 'Followers - ' + $now.toFormat('yyyy-MM-dd') }}",
+        "options": {}
+      },
+      "id": "adacaa6e-281d-4ba9-9a49-2c002c5bba73",
+      "name": "Create New Tab",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1712,
+        0
+      ],
+      "executeOnce": true,
+      "retryOnFail": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "Your Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const HEADERS = [\n  'classification', 'scrapeRound',\n'fullName', 'firstName_from_input', 'lastName_from_input', 'profileUrl', 'followers', 'isFollowing', 'timestamp of download', 'companyIndustry', 'companyName', 'companyWebsite', 'linkedinCompanyUrl', 'linkedinCompanySlug', 'linkedinCompanyId', 'linkedinDescription', 'linkedinHeadline', 'linkedinIsHiringBadge', 'linkedinIsOpenToWorkBadge', 'linkedinJobDateRange', 'linkedinJobLocation', 'linkedinPreviousJobDescription', 'linkedinJobTitle', 'linkedinProfileId', 'linkedinProfileSlug', 'linkedinProfileUrl', 'linkedinProfileUrn', 'linkedinProfileImageUrl', 'linkedinSkillsLabel', 'location', 'mutualConnectionsUrl', 'connectionsUrl', 'linkedinCompanyName', 'linkedinCompanyDescription','linkedinCompanyTagline', 'linkedinCompanyFollowerCount', 'linkedinCompanyWebsite', 'linkedinCompanyEmployeesCount', 'linkedinCompanySize', 'linkedinCompanyIndustry', 'linkedinCompanyHeadquarter', 'linkedinCompanySpecialities', 'linkedinCompanyFounded'\n];\n\nconst item = {};\nfor (const h of HEADERS) item[h] = '';\nreturn [{ json: item }];"
+      },
+      "id": "3a3f5717-003a-4a8e-affc-9222310901a7",
+      "name": "Build Header Item",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ 'Followers - ' + $now.toFormat('yyyy-MM-dd') }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "cb7669dd-5c80-4859-9b4c-2dac59971e08",
+      "name": "Append Header",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2128,
+        0
+      ],
+      "retryOnFail": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "Your Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Find New Followers').all();"
+      },
+      "id": "841ee6cd-e01c-4789-bc07-9fa4dd565c98",
+      "name": "Prepare Follower Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2320,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $('Create New Tab').first().json.title }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "fullName": "={{ $json.fullName }}",
+            "firstName_from_input": "={{ $json.firstName }}",
+            "lastName_from_input": "={{ $json.lastName }}",
+            "profileUrl": "={{ $json.profileLink }}",
+            "followers": "={{ $json.followers }}",
+            "isFollowing": "={{ $json.isFollowing }}",
+            "timestamp of download": "={{ $json.timestamp }}"
+          },
+          "matchingColumns": [
+            "fullName"
+          ],
+          "schema": [
+            {
+              "id": "classification",
+              "displayName": "classification",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "scrapeRound",
+              "displayName": "scrapeRound",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "fullName",
+              "displayName": "fullName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "firstName_from_input",
+              "displayName": "firstName_from_input",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "lastName_from_input",
+              "displayName": "lastName_from_input",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "profileUrl",
+              "displayName": "profileUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "followers",
+              "displayName": "followers",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "isFollowing",
+              "displayName": "isFollowing",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "timestamp of download",
+              "displayName": "timestamp of download",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "companyIndustry",
+              "displayName": "companyIndustry",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "companyName",
+              "displayName": "companyName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "companyWebsite",
+              "displayName": "companyWebsite",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyUrl",
+              "displayName": "linkedinCompanyUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanySlug",
+              "displayName": "linkedinCompanySlug",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyId",
+              "displayName": "linkedinCompanyId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinDescription",
+              "displayName": "linkedinDescription",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinHeadline",
+              "displayName": "linkedinHeadline",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinIsHiringBadge",
+              "displayName": "linkedinIsHiringBadge",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinIsOpenToWorkBadge",
+              "displayName": "linkedinIsOpenToWorkBadge",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinJobDateRange",
+              "displayName": "linkedinJobDateRange",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinJobLocation",
+              "displayName": "linkedinJobLocation",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinPreviousJobDescription",
+              "displayName": "linkedinPreviousJobDescription",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinJobTitle",
+              "displayName": "linkedinJobTitle",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinProfileId",
+              "displayName": "linkedinProfileId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinProfileSlug",
+              "displayName": "linkedinProfileSlug",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinProfileUrl",
+              "displayName": "linkedinProfileUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinProfileUrn",
+              "displayName": "linkedinProfileUrn",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinProfileImageUrl",
+              "displayName": "linkedinProfileImageUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinSkillsLabel",
+              "displayName": "linkedinSkillsLabel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "location",
+              "displayName": "location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "mutualConnectionsUrl",
+              "displayName": "mutualConnectionsUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "connectionsUrl",
+              "displayName": "connectionsUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyName",
+              "displayName": "linkedinCompanyName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyDescription",
+              "displayName": "linkedinCompanyDescription",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyTagline",
+              "displayName": "linkedinCompanyTagline",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyFollowerCount",
+              "displayName": "linkedinCompanyFollowerCount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyWebsite",
+              "displayName": "linkedinCompanyWebsite",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyEmployeesCount",
+              "displayName": "linkedinCompanyEmployeesCount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanySize",
+              "displayName": "linkedinCompanySize",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyIndustry",
+              "displayName": "linkedinCompanyIndustry",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyHeadquarter",
+              "displayName": "linkedinCompanyHeadquarter",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanySpecialities",
+              "displayName": "linkedinCompanySpecialities",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyFounded",
+              "displayName": "linkedinCompanyFounded",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "firstName",
+              "displayName": "firstName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "lastName",
+              "displayName": "lastName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "occupation",
+              "displayName": "occupation",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "profileLink",
+              "displayName": "profileLink",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "ee965f7b-cd71-4cec-b71f-9caad165e963",
+      "name": "Append New Followers",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2528,
+        0
+      ],
+      "retryOnFail": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "Your Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const masterItems = $input.all();\nconst normalise = url => (url || '').trim().toLowerCase().replace(/\\/+$/, '');\n\nconst phantomFollowers = $('Parse Phantom Output').first().json.followers;\nconst phantomUrls = new Set(\n  phantomFollowers.map(f => normalise(f.profileLink)).filter(Boolean)\n);\n\n// Header is NOT in Read Master output. masterItems[0] = row 2, so rowNumber = index + 2.\nconst lostRows = masterItems\n  .map((item, index) => ({\n    profileLink: item.json.profileUrl,\n    rowNumber: index + 2\n  }))\n  .filter(row => {\n    const url = normalise(row.profileLink);\n    return url && !phantomUrls.has(url);\n  })\n  .sort((a, b) => b.rowNumber - a.rowNumber);\n\nconsole.log(`Master rows: ${masterItems.length}`);\nconsole.log(`Phantom URLs: ${phantomUrls.size}`);\nconsole.log(`Lost followers: ${lostRows.length}`);\n\nreturn [{\n  json: {\n    lostCount: lostRows.length,\n    lostFollowers: lostRows.map(r => r.profileLink),\n    lostRowNumbers: lostRows.map(r => r.rowNumber)\n  }\n}];"
+      },
+      "id": "a9cf80b2-ec93-44b1-b6e8-402ae9da56a0",
+      "name": "Find Lost Followers",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1488,
+        240
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const { lostRowNumbers } = $input.first().json;\nif (!lostRowNumbers || lostRowNumbers.length === 0) return [];\n// Extra guard: only valid integers > 1 (row 1 is the header — never delete it)\nconst valid = lostRowNumbers.filter(n => Number.isInteger(n) && n > 1);\nif (valid.length === 0) return [];\n// Already sorted descending — safe bottom-up deletion\nreturn valid.map(rowNumber => ({ json: { rowNumber } }));"
+      },
+      "id": "78004346-77c9-4064-bf6a-6c0cda154d15",
+      "name": "Expand Lost Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        240
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "delete",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Master",
+          "mode": "name"
+        },
+        "startIndex": "={{ $json.rowNumber - 1 }}"
+      },
+      "id": "0a9d2316-0810-4fa2-8f53-e19fb94f374b",
+      "name": "Delete from Master",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2528,
+        240
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "Your Google Sheets account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2960,
+        128
+      ],
+      "id": "3c04d57b-b6cb-4747-a67e-285b3c4ab59e",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "agentId": "YOUR_PROFILE_ENRICHMENT_AGENT_ID"
+      },
+      "type": "n8n-nodes-base.phantombuster",
+      "typeVersion": 1,
+      "position": [
+        3392,
+        128
+      ],
+      "id": "f74a8b1b-59e6-43ff-8dc2-6762bfdb8201",
+      "name": "Get an agent1",
+      "executeOnce": false,
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "phantombusterApi": {
+          "name": "Your PhantomBuster account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "agentId": "={{ $json.id }}",
+        "jsonParameters": true,
+        "additionalFields": {
+          "argumentsJson": "={\n\t\"numberOfAddsPerLaunch\": 500,\n\t\"enrichWithCompanyData\": true,\n\t\"updateMonitoringMetadata\": false,\n\t\"pushResultToCRM\": true,\n\t\"spreadsheetUrl\": \"https://docs.google.com/spreadsheets/d/{{ $('Create New Tab').first().json.spreadsheetId }}/edit?gid={{ $('Create New Tab').first().json.sheetId }}#gid={{ $('Create New Tab').first().json.sheetId }}\",\n\t\"identities\": [\n\t\t{\n\t\t\t\"identityId\": \"YOUR_LINKEDIN_IDENTITY_ID\",\n\t\t\t\"sessionCookie\": \"YOUR_LINKEDIN_SESSION_COOKIE\",\n\t\t\t\"userAgent\": \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36\"\n\t\t}\n\t],\n\t\"crmOutputFieldsMapping\": [],\n\t\"columnName\": \"profileUrl\"\n}",
+          "manualLaunch": true
+        }
+      },
+      "type": "n8n-nodes-base.phantombuster",
+      "typeVersion": 1,
+      "position": [
+        3600,
+        128
+      ],
+      "id": "a4562ed2-cfa4-4cb9-b8f3-4865f8466a82",
+      "name": "Add an agent to the launch queue1",
+      "executeOnce": false,
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "phantombusterApi": {
+          "name": "Your PhantomBuster account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 45,
+        "unit": "minutes"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        3808,
+        128
+      ],
+      "id": "d303fbf2-dbc2-4aec-bc58-e500a5baa5d7",
+      "name": "Wait1",
+      "webhookId": "2487499f-6c55-4122-b283-be161671dc6c"
+    },
+    {
+      "parameters": {
+        "jsCode": "const allItems = $input.all();\n\n// Append New Followers returns sheet column names (profileUrl, not profileLink)\nconst followerItems = allItems.filter(item => item.json.profileUrl !== undefined);\nconst newCount = followerItems.length;\n\n// lostCount lives in Find Lost Followers — not passed through Delete from Master\nconst lostCount = $('Find Lost Followers').first().json.lostCount ?? 0;\n\nreturn [{\n  json: {\n    newCount,\n    lostCount,\n    newFollowers: followerItems.map(item => item.json)\n  }\n}];"
+      },
+      "id": "63739330-99e8-4c4b-b839-250630412663",
+      "name": "Aggregate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3200,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "getOutput",
+        "agentId": "={{ $('Get an agent1').item.json.id }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.phantombuster",
+      "typeVersion": 1,
+      "position": [
+        4000,
+        128
+      ],
+      "id": "47665df5-7aa9-4762-83f6-f67c26076837",
+      "name": "Get the output of an agent1",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "phantombusterApi": {
+          "name": "Your PhantomBuster account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const enrichmentItems = $input.all();\nconst newFollowers = $('Aggregate').first().json.newFollowers;\n\nconst normalise = url => (url || '').trim().replace(/\\/+$/, '');\n\nreturn enrichmentItems.map((item, index) => {\n  const follower = newFollowers[index];\n  // profileLink is the Phantom follower field; profileUrl is a fallback\n  const profileUrl = normalise(follower?.profileLink ?? follower?.profileUrl ?? '');\n  return {\n    json: {\n      ...item.json,\n      profileUrl, // after spread: overrides any trailing-slash profileUrl from the scraper\n    }\n  };\n});"
+      },
+      "id": "d91afc11-2e34-4fca-9686-a31ec4276066",
+      "name": "Prepare Enrichment Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4576,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $('Create New Tab').first().json.title }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "profileUrl": "={{ $json.profileUrl }}",
+            "companyIndustry": "={{ $json.companyIndustry }}",
+            "companyName": "={{ $json.companyName }}",
+            "companyWebsite": "={{ $json.companyWebsite }}",
+            "linkedinCompanyUrl": "={{ $json.linkedinCompanyUrl }}",
+            "linkedinCompanySlug": "={{ $json.linkedinCompanySlug }}",
+            "linkedinCompanyId": "={{ $json.linkedinCompanyId }}",
+            "linkedinDescription": "={{ $json.linkedinDescription }}",
+            "linkedinHeadline": "={{ $json.linkedinHeadline }}",
+            "linkedinIsHiringBadge": "={{ $json.linkedinIsHiringBadge }}",
+            "linkedinIsOpenToWorkBadge": "={{ $json.linkedinIsOpenToWorkBadge }}",
+            "linkedinJobDateRange": "={{ $json.linkedinJobDateRange }}",
+            "linkedinJobLocation": "={{ $json.linkedinJobLocation }}",
+            "linkedinPreviousJobDescription": "={{ $json.linkedinPreviousJobDescription }}",
+            "linkedinJobTitle": "={{ $json.linkedinJobTitle }}",
+            "linkedinProfileId": "={{ $json.linkedinProfileId }}",
+            "linkedinProfileSlug": "={{ $json.linkedinProfileSlug }}",
+            "linkedinProfileUrl": "={{ $json.linkedinProfileUrl }}",
+            "linkedinProfileUrn": "={{ $json.linkedinProfileUrn }}",
+            "linkedinProfileImageUrl": "={{ $json.linkedinProfileImageUrl }}",
+            "linkedinSkillsLabel": "={{ $json.linkedinSkillsLabel }}",
+            "location": "={{ $json.location }}",
+            "mutualConnectionsUrl": "={{ $json.mutualConnectionsUrl }}",
+            "connectionsUrl": "={{ $json.connectionsUrl }}",
+            "linkedinCompanyName": "={{ $json.linkedinCompanyName }}",
+            "linkedinCompanyDescription": "={{ $json.linkedinCompanyDescription }}",
+            "linkedinCompanyTagline": "={{ $json.linkedinCompanyTagline }}",
+            "linkedinCompanyFollowerCount": "={{ $json.linkedinCompanyFollowerCount }}",
+            "linkedinCompanyWebsite": "={{ $json.linkedinCompanyWebsite }}",
+            "linkedinCompanyEmployeesCount": "={{ $json.linkedinCompanyEmployeesCount }}",
+            "linkedinCompanySize": "={{ $json.linkedinCompanySize }}",
+            "linkedinCompanyIndustry": "={{ $json.linkedinCompanyIndustry }}",
+            "linkedinCompanyHeadquarter": "={{ $json.linkedinCompanyHeadquarter }}",
+            "linkedinCompanySpecialities": "={{ $json.linkedinCompanySpecialities }}",
+            "linkedinCompanyFounded": "={{ $json.linkedinCompanyFounded }}"
+          },
+          "matchingColumns": [
+            "profileUrl"
+          ],
+          "schema": [
+            {
+              "id": "classification",
+              "displayName": "classification",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "scrapeRound",
+              "displayName": "scrapeRound",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "fullName",
+              "displayName": "fullName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "firstName_from_input",
+              "displayName": "firstName_from_input",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "lastName_from_input",
+              "displayName": "lastName_from_input",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "profileUrl",
+              "displayName": "profileUrl",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "followers",
+              "displayName": "followers",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "isFollowing",
+              "displayName": "isFollowing",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "timestamp of download",
+              "displayName": "timestamp of download",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "companyIndustry",
+              "displayName": "companyIndustry",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "companyName",
+              "displayName": "companyName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "companyWebsite",
+              "displayName": "companyWebsite",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyUrl",
+              "displayName": "linkedinCompanyUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanySlug",
+              "displayName": "linkedinCompanySlug",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyId",
+              "displayName": "linkedinCompanyId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinDescription",
+              "displayName": "linkedinDescription",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinHeadline",
+              "displayName": "linkedinHeadline",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinIsHiringBadge",
+              "displayName": "linkedinIsHiringBadge",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinIsOpenToWorkBadge",
+              "displayName": "linkedinIsOpenToWorkBadge",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinJobDateRange",
+              "displayName": "linkedinJobDateRange",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinJobLocation",
+              "displayName": "linkedinJobLocation",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinPreviousJobDescription",
+              "displayName": "linkedinPreviousJobDescription",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinJobTitle",
+              "displayName": "linkedinJobTitle",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinProfileId",
+              "displayName": "linkedinProfileId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinProfileSlug",
+              "displayName": "linkedinProfileSlug",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinProfileUrl",
+              "displayName": "linkedinProfileUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinProfileUrn",
+              "displayName": "linkedinProfileUrn",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinProfileImageUrl",
+              "displayName": "linkedinProfileImageUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinSkillsLabel",
+              "displayName": "linkedinSkillsLabel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "location",
+              "displayName": "location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "mutualConnectionsUrl",
+              "displayName": "mutualConnectionsUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "connectionsUrl",
+              "displayName": "connectionsUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyName",
+              "displayName": "linkedinCompanyName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyDescription",
+              "displayName": "linkedinCompanyDescription",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyTagline",
+              "displayName": "linkedinCompanyTagline",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyFollowerCount",
+              "displayName": "linkedinCompanyFollowerCount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyWebsite",
+              "displayName": "linkedinCompanyWebsite",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyEmployeesCount",
+              "displayName": "linkedinCompanyEmployeesCount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanySize",
+              "displayName": "linkedinCompanySize",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyIndustry",
+              "displayName": "linkedinCompanyIndustry",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyHeadquarter",
+              "displayName": "linkedinCompanyHeadquarter",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanySpecialities",
+              "displayName": "linkedinCompanySpecialities",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyFounded",
+              "displayName": "linkedinCompanyFounded",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bdaa67d5-627a-41a2-ad9c-32dcd7e9b75b",
+      "name": "Update New Tab with Enrichment",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        4816,
+        144
+      ],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "Your Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "f949f9ad-6039-469b-ac4e-48f23d284ec5",
+      "name": "Loop Over Items1",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        5008,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconst text = item.json.output?.[0]?.content?.[0]?.text ?? {};\nconst classification = typeof text === 'string'\n  ? String(Object.values(JSON.parse(text))[0] ?? '')\n  : String(Object.values(text)[0] ?? '');\nreturn [{ json: { classification } }];"
+      },
+      "id": "67cb512d-8cc7-4437-b419-c2a430d7a3e9",
+      "name": "Extract Classifications",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5808,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $('Create New Tab').first().json.title }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "linkedinProfileUrn": "={{ $('Loop Over Items1').item.json.linkedinProfileUrn }}",
+            "classification": "={{ $json.classification }}",
+            "scrapeRound": "={{ $now.toFormat('dd.MM.yyyy.') }}"
+          },
+          "matchingColumns": [
+            "linkedinProfileUrn"
+          ],
+          "schema": [
+            {
+              "id": "classification",
+              "displayName": "classification",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "scrapeRound",
+              "displayName": "scrapeRound",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "fullName",
+              "displayName": "fullName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "firstName_from_input",
+              "displayName": "firstName_from_input",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "lastName_from_input",
+              "displayName": "lastName_from_input",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "profileUrl",
+              "displayName": "profileUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "followers",
+              "displayName": "followers",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "isFollowing",
+              "displayName": "isFollowing",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "timestamp of download",
+              "displayName": "timestamp of download",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "companyIndustry",
+              "displayName": "companyIndustry",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "companyName",
+              "displayName": "companyName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "companyWebsite",
+              "displayName": "companyWebsite",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyUrl",
+              "displayName": "linkedinCompanyUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanySlug",
+              "displayName": "linkedinCompanySlug",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyId",
+              "displayName": "linkedinCompanyId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinDescription",
+              "displayName": "linkedinDescription",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinHeadline",
+              "displayName": "linkedinHeadline",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinIsHiringBadge",
+              "displayName": "linkedinIsHiringBadge",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinIsOpenToWorkBadge",
+              "displayName": "linkedinIsOpenToWorkBadge",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinJobDateRange",
+              "displayName": "linkedinJobDateRange",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinJobLocation",
+              "displayName": "linkedinJobLocation",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinPreviousJobDescription",
+              "displayName": "linkedinPreviousJobDescription",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinJobTitle",
+              "displayName": "linkedinJobTitle",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinProfileId",
+              "displayName": "linkedinProfileId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinProfileSlug",
+              "displayName": "linkedinProfileSlug",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinProfileUrl",
+              "displayName": "linkedinProfileUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinProfileUrn",
+              "displayName": "linkedinProfileUrn",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinProfileImageUrl",
+              "displayName": "linkedinProfileImageUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinSkillsLabel",
+              "displayName": "linkedinSkillsLabel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "location",
+              "displayName": "location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "mutualConnectionsUrl",
+              "displayName": "mutualConnectionsUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "connectionsUrl",
+              "displayName": "connectionsUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyName",
+              "displayName": "linkedinCompanyName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyDescription",
+              "displayName": "linkedinCompanyDescription",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyTagline",
+              "displayName": "linkedinCompanyTagline",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyFollowerCount",
+              "displayName": "linkedinCompanyFollowerCount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyWebsite",
+              "displayName": "linkedinCompanyWebsite",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyEmployeesCount",
+              "displayName": "linkedinCompanyEmployeesCount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanySize",
+              "displayName": "linkedinCompanySize",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyIndustry",
+              "displayName": "linkedinCompanyIndustry",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyHeadquarter",
+              "displayName": "linkedinCompanyHeadquarter",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanySpecialities",
+              "displayName": "linkedinCompanySpecialities",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedinCompanyFounded",
+              "displayName": "linkedinCompanyFounded",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "82b4aead-5950-4b2e-8c3a-95d6e5001d98",
+      "name": "Save Classifications",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        6160,
+        272
+      ],
+      "retryOnFail": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "Your Google Sheets account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $('Create New Tab').first().json.title }}",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        5296,
+        -48
+      ],
+      "id": "3eac898b-5ae5-4073-98a8-997cb83b5fa6",
+      "name": "Get row(s) in sheet",
+      "executeOnce": true,
+      "retryOnFail": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "Your Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Master",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "classification",
+              "displayName": "classification",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "scrapeRound",
+              "displayName": "scrapeRound",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "fullName",
+              "displayName": "fullName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "firstName_from_input",
+              "displayName": "firstName_from_input",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "lastName_from_input",
+              "displayName": "lastName_from_input",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "profileUrl",
+              "displayName": "profileUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "followers",
+              "displayName": "followers",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "isFollowing",
+              "displayName": "isFollowing",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "timestamp of download",
+              "displayName": "timestamp of download",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "companyIndustry",
+              "displayName": "companyIndustry",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "companyName",
+              "displayName": "companyName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "companyWebsite",
+              "displayName": "companyWebsite",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinCompanyUrl",
+              "displayName": "linkedinCompanyUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinCompanySlug",
+              "displayName": "linkedinCompanySlug",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinCompanyId",
+              "displayName": "linkedinCompanyId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinDescription",
+              "displayName": "linkedinDescription",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinHeadline",
+              "displayName": "linkedinHeadline",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinIsHiringBadge",
+              "displayName": "linkedinIsHiringBadge",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinIsOpenToWorkBadge",
+              "displayName": "linkedinIsOpenToWorkBadge",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinJobDateRange",
+              "displayName": "linkedinJobDateRange",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinJobLocation",
+              "displayName": "linkedinJobLocation",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinPreviousJobDescription",
+              "displayName": "linkedinPreviousJobDescription",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinJobTitle",
+              "displayName": "linkedinJobTitle",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinProfileId",
+              "displayName": "linkedinProfileId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinProfileSlug",
+              "displayName": "linkedinProfileSlug",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinProfileUrl",
+              "displayName": "linkedinProfileUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinProfileUrn",
+              "displayName": "linkedinProfileUrn",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinProfileImageUrl",
+              "displayName": "linkedinProfileImageUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinSkillsLabel",
+              "displayName": "linkedinSkillsLabel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "location",
+              "displayName": "location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "mutualConnectionsUrl",
+              "displayName": "mutualConnectionsUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "connectionsUrl",
+              "displayName": "connectionsUrl",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinCompanyName",
+              "displayName": "linkedinCompanyName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinCompanyDescription",
+              "displayName": "linkedinCompanyDescription",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinCompanyTagline",
+              "displayName": "linkedinCompanyTagline",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinCompanyFollowerCount",
+              "displayName": "linkedinCompanyFollowerCount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinCompanyWebsite",
+              "displayName": "linkedinCompanyWebsite",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinCompanyEmployeesCount",
+              "displayName": "linkedinCompanyEmployeesCount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinCompanySize",
+              "displayName": "linkedinCompanySize",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinCompanyIndustry",
+              "displayName": "linkedinCompanyIndustry",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinCompanyHeadquarter",
+              "displayName": "linkedinCompanyHeadquarter",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinCompanySpecialities",
+              "displayName": "linkedinCompanySpecialities",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedinCompanyFounded",
+              "displayName": "linkedinCompanyFounded",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "afc71be7-2a81-43d2-81eb-64d4c214f735",
+      "name": "Append to Master",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        5520,
+        -48
+      ],
+      "retryOnFail": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "Your Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "destinationFieldName": "Append to Master data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        5728,
+        -48
+      ],
+      "id": "2751bc45-dd13-4365-882a-8463ad916a91",
+      "name": "Aggregate1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the follower-change summary for the email report.\n// Per-label counts are DYNAMIC: whatever labels your classifier produced are\n// counted automatically -- no category name is hardcoded here.\nconst masterFinalItems = $input.all();\nconst masterFinalCount = masterFinalItems.length;\n\nconst newFollowers = $('Get row(s) in sheet').all().map(i => i.json);\nconst lostFollowers = $('Expand Lost Rows').all();\n\nconst new_total = newFollowers.length;\nconst lost_total = lostFollowers.length;\n\n// Count every distinct classification label across the whole master sheet.\nconst label_counts = {};\nfor (const it of masterFinalItems) {\n  const label = String(it.json.classification ?? '').trim();\n  if (!label) continue;\n  label_counts[label] = (label_counts[label] || 0) + 1;\n}\n\nreturn [{\n  json: {\n    new_connections_total: masterFinalCount,\n    net_increase_total: new_total - lost_total,\n    lost_connections: lost_total,\n    label_counts,\n  }\n}];"
+      },
+      "id": "9a1a4edb-0002-4ae6-a5bb-f8e63f7b2e66",
+      "name": "Collect Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7056,
+        -48
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Master",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "c0573c90-10aa-45cc-a29c-ae0299e03f0e",
+      "name": "Read Master Final",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        6832,
+        -48
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "Your Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "your-email@example.com",
+        "subject": "=Follower change - {{ $now.toFormat('yyyy-MM-dd') }}",
+        "message": "=Overall connection number: {{ $json.new_connections_total }} <br>\nNet increase: {{ $json.net_increase_total }} <br>\nLost connections: {{ $json.lost_connections }} <br>\n{{ Object.entries($json.label_counts).map(([k,v]) => `Total ${k}: ${v}`).join(' <br>\\n') }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        7264,
+        -48
+      ],
+      "id": "0872f27c-257d-4de0-8483-2c244459f502",
+      "name": "Send a message",
+      "webhookId": "47c56951-0736-48c7-ae73-ad921cb5bc6b",
+      "retryOnFail": true,
+      "credentials": {
+        "gmailOAuth2": {
+          "name": "Your Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-5-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-5-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=# ROLE\nYou are a strict single-label classifier. For each input record you receive, choose\nexactly ONE category from the list defined in the EDIT ZONE below.\n\n# ============================================================================\n# EDIT ZONE  --  change ONLY what is between these two markers.\n# This is where you define YOUR OWN categories and the rules for choosing them.\n# You can classify by anything you like (industry, seniority, company size,\n# ICP fit, buyer vs. not, region, etc.) -- just keep the shape below.\n# Do NOT touch the OUTPUT CONTRACT section that comes after the END marker.\n# ============================================================================\n\n## Categories -- output exactly one of these labels, copied character-for-character:\n- \"Category A\"\n- \"Category B\"\n- \"Other\"\n\n## How to decide (be conservative -- when unsure, use your catch-all category):\n1. \"Category A\" if <describe exactly what makes a record Category A>.\n2. \"Category B\" if <describe exactly what makes a record Category B>.\n3. If the data is insufficient, ambiguous, or fits none of the above -> \"Other\".\n\n## Input you will receive\nOne record as key-value pairs, e.g.:\n  companyName: *Acme* | companyIndustry: *...* | linkedinCompanyDescription: *...* | linkedinJobTitle: *...*\nKeys may be missing. Focus on the fields relevant to your categories above.\n\n## Examples (add a few of your own -- they sharpen accuracy a lot):\n### Example 1\ncompanyName: *Acme Mutual* | companyIndustry: *Insurance* | linkedinJobTitle: *Claims Manager*\nAnswer: \"Category A\"\n\n### Example 2\ncompanyName: *BrightCloud Analytics* | companyIndustry: *Software* | linkedinJobTitle: *Account Executive*\nAnswer: \"Other\"\n\n# ============================================================================\n# END EDIT ZONE\n# ============================================================================\n\n# OUTPUT CONTRACT -- DO NOT CHANGE.\n# Changing this will break the \"Extract Classifications\" node downstream.\nReturn a JSON object with a single field named \"classification\" whose value is\nEXACTLY one of the category labels defined above, copied character-for-character.\nNo other fields. No punctuation, quotes, explanations, or extra text outside the JSON.\nA valid response looks like: {\"classification\": \"Category A\"}\nYou must ALWAYS return an answer, in every case."
+            },
+            {
+              "content": "=companyName: {{ $json.companyName }}\n\nlinkedinCompanyIndustry: {{ $json.companyIndustry }}\n\nlinkedinCompanyDescription: {{ $json.linkedinCompanyDescription }}\n\nlinkedinJobTitle: {{ $json.linkedinJobTitle }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {
+          "maxTokens": 7000,
+          "reasoning": {
+            "reasoningOptions": {
+              "summary": "none"
+            }
+          },
+          "textFormat": {
+            "textOptions": {
+              "type": "json_object"
+            }
+          }
+        }
+      },
+      "id": "573748c0-1ceb-4cc7-bd90-fd5e0a28b949",
+      "name": "AI Classification",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        5376,
+        224
+      ],
+      "retryOnFail": true,
+      "credentials": {
+        "openAiApi": {
+          "name": "Your OpenAI account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-jsonurl",
+              "leftValue": "={{ $json.jsonUrl }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-large-output",
+      "name": "Is Large Output?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        592,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.jsonUrl }}",
+        "options": {}
+      },
+      "id": "http-download-json",
+      "name": "Download Follower JSON",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        768,
+        -160
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "merge-phantom-output",
+      "name": "Merge Phantom Output",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        896,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 2,
+              "triggerAtDay": [
+                3
+              ],
+              "triggerAtHour": 5,
+              "triggerAtMinute": 13
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -448,
+        96
+      ],
+      "id": "3c3c68a9-c307-4c05-a390-6f15a8308446",
+      "name": "Schedule Trigger1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-jsonurl",
+              "leftValue": "={{ $json.jsonUrl }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f8f98741-f5b0-4c5b-9683-780fdce18796",
+      "name": "Is Large Output?1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4192,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.jsonUrl }}",
+        "options": {}
+      },
+      "id": "8513ce0f-aa30-4f13-af9c-c336a6b0c77e",
+      "name": "Download Follower JSON1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4352,
+        -64
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Get an agent": {
+      "main": [
+        [
+          {
+            "node": "Add an agent to the launch queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add an agent to the launch queue": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Get the output of an agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Phantom Output": {
+      "main": [
+        [
+          {
+            "node": "Read Master",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Master": {
+      "main": [
+        [
+          {
+            "node": "Find New Followers",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Find Lost Followers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find New Followers": {
+      "main": [
+        [
+          {
+            "node": "Create New Tab",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create New Tab": {
+      "main": [
+        [
+          {
+            "node": "Build Header Item",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Header Item": {
+      "main": [
+        [
+          {
+            "node": "Append Header",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Header": {
+      "main": [
+        [
+          {
+            "node": "Prepare Follower Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Follower Data": {
+      "main": [
+        [
+          {
+            "node": "Append New Followers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Lost Followers": {
+      "main": [
+        [
+          {
+            "node": "Expand Lost Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Lost Rows": {
+      "main": [
+        [
+          {
+            "node": "Delete from Master",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append New Followers": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete from Master": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Get an agent1": {
+      "main": [
+        [
+          {
+            "node": "Add an agent to the launch queue1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add an agent to the launch queue1": {
+      "main": [
+        [
+          {
+            "node": "Wait1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait1": {
+      "main": [
+        [
+          {
+            "node": "Get the output of an agent1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Aggregate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate": {
+      "main": [
+        [
+          {
+            "node": "Get an agent1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get the output of an agent1": {
+      "main": [
+        [
+          {
+            "node": "Is Large Output?1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Enrichment Data": {
+      "main": [
+        [
+          {
+            "node": "Update New Tab with Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update New Tab with Enrichment": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items1": {
+      "main": [
+        [
+          {
+            "node": "Get row(s) in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AI Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Classifications": {
+      "main": [
+        [
+          {
+            "node": "Save Classifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Classifications": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get row(s) in sheet": {
+      "main": [
+        [
+          {
+            "node": "Append to Master",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append to Master": {
+      "main": [
+        [
+          {
+            "node": "Aggregate1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate1": {
+      "main": [
+        [
+          {
+            "node": "Read Master Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Master Final": {
+      "main": [
+        [
+          {
+            "node": "Collect Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Summary": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Classification": {
+      "main": [
+        [
+          {
+            "node": "Extract Classifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get the output of an agent": {
+      "main": [
+        [
+          {
+            "node": "Is Large Output?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Large Output?": {
+      "main": [
+        [
+          {
+            "node": "Download Follower JSON",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge Phantom Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Follower JSON": {
+      "main": [
+        [
+          {
+            "node": "Merge Phantom Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Phantom Output": {
+      "main": [
+        [
+          {
+            "node": "Parse Phantom Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger1": {
+      "main": [
+        [
+          {
+            "node": "Get an agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Large Output?1": {
+      "main": [
+        [
+          {
+            "node": "Download Follower JSON1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Enrichment Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Follower JSON1": {
+      "main": [
+        [
+          {
+            "node": "Prepare Enrichment Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false,
+    "callerPolicy": "workflowsFromSameOwner",
+    "timeSavedMode": "fixed",
+    "timezone": "UTC",
+    "timeSavedPerExecution": 120
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

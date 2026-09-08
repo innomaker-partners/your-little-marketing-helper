@@ -1,0 +1,14 @@
+{
+  "name": "your-little-marketing-helper",
+  "owner": { "name": "InnoMaker Partners" },
+  "metadata": {
+    "description": "Free marketing tools from InnoMaker Partners. Add this repo in the Claude app, then install any tool below as a plugin."
+  },
+  "plugins": [
+    { "name": "content-at-scale", "source": "./content-at-scale/claude_code", "description": "Produce many content pieces in one run, with the quality control inside the run." },
+    { "name": "workflow-workarounds", "source": "./workflow-workarounds/claude_code", "description": "Two skills for platforms that give Claude no clean API or an awkward OAuth wall." },
+    { "name": "marketing-scraping", "source": "./marketing-scraping/claude_code_cowork_plugin", "description": "Competitor-ad, customer-review, and search-result research on your own Apify account." },
+    { "name": "linkedin-follower-tracker", "source": "./linkedin-follower-tracker/claude_code_cowork_plugin", "description": "Track how your LinkedIn following changes over time, enriched and classified. (Plugin form; an n8n form also ships in this tool's folder.)" },
+    { "name": "meeting-intel", "source": "./meeting-intel/cowork", "description": "Research external meeting participants and produce briefs before your calls. (Plugin form; Make.com forms also ship in this tool's folder.)" }
+  ]
+}

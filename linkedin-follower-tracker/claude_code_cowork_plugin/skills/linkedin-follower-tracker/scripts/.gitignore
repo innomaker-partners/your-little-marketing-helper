@@ -1,0 +1,15 @@
+# Transient run artifacts from run_pipeline.py (workdirs, status/marker files).
+# These are working aids, regenerated on every run — never deliverables.
+_run*/
+# The live production workdir (created when --workdir ./_live is used). It holds
+# real follower data (master.csv) and the capture-once salvage files — real container
+# ids and rescued follower records — so it must never be committed.
+_live/
+# Defensive: any capture-once salvage dir, wherever a workdir is placed, holds real
+# paid data. Belt-and-suspenders in case a run uses a differently-named workdir.
+captures/
+# Real follower data (PII): the running master history and any dated export, should
+# a run ever write them beside the scripts instead of into a subject directory.
+master.csv
+Followers*.csv
+.env

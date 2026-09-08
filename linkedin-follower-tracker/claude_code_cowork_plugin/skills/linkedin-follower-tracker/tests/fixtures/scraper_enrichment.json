@@ -1,0 +1,24 @@
+[
+  {
+    "firstName": "Eve",
+    "lastName": "Entry",
+    "profileUrl": "https://www.linkedin.com/in/ACoAAA_eee/",
+    "companyName": "Echo Co",
+    "companyIndustry": "Software",
+    "linkedinJobTitle": "Analyst",
+    "linkedinCompanyDescription": "Echo Co builds analytics tools.",
+    "linkedinCompanyIndustry": "Software Development",
+    "linkedinCompanyEmployeesCount": 45
+  },
+  {
+    "firstName": "Dan",
+    "lastName": "Debut",
+    "profileUrl": "https://www.linkedin.com/in/ACoAAA_ddd/",
+    "companyName": "Delta Co",
+    "companyIndustry": "Manufacturing",
+    "linkedinJobTitle": "Head of Sales",
+    "linkedinCompanyDescription": "Delta Co manufactures industrial parts.",
+    "linkedinCompanyIndustry": "Industrial Machinery",
+    "linkedinCompanyEmployeesCount": 1200
+  }
+]

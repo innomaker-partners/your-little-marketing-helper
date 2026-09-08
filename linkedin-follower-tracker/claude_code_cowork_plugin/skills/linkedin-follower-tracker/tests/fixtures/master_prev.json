@@ -1,0 +1,35 @@
+[
+  {
+    "classification": "Buyer",
+    "scrapeRound": "2026-08-01",
+    "fullName": "Ada Active",
+    "profileUrl": "https://www.linkedin.com/in/ACoAAA_aaa/",
+    "followers": "500",
+    "isFollowing": "true",
+    "linkedinJobTitle": "VP Marketing",
+    "companyName": "Alpha Co",
+    "lost_on": ""
+  },
+  {
+    "classification": "Buyer",
+    "scrapeRound": "2026-08-01",
+    "fullName": "Ben Bygone",
+    "profileUrl": "https://www.linkedin.com/in/ACoAAA_bbb",
+    "followers": "300",
+    "isFollowing": "false",
+    "linkedinJobTitle": "Director of Ops",
+    "companyName": "Beta Co",
+    "lost_on": ""
+  },
+  {
+    "classification": "Not a fit",
+    "scrapeRound": "2026-08-01",
+    "fullName": "Cara Constant",
+    "profileUrl": "https://www.linkedin.com/in/ACoAAA_ccc",
+    "followers": "120",
+    "isFollowing": "false",
+    "linkedinJobTitle": "Student",
+    "companyName": "",
+    "lost_on": ""
+  }
+]

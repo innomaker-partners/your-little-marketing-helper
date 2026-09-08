@@ -1,0 +1,39 @@
+{
+  "_comment": "Copy to AD_INTEL_CONFIG.json and fill in. This single file drives the tool. Values below are a worked US example. You bring your own Apify account + your own LLM.",
+
+  "country_code": "us",
+  "country_codes": ["us"],
+  "_country_codes_comment": "Optional list — overrides country_code when non-empty. Adding countries multiplies ad volume (and Apify cost) proportionally. Note: Meta by-advertiser scraping uses a single country (or 'ALL' when you list several); Google multiplies per (country × domain); LinkedIn ignores country entirely by default (see below).",
+  "language": "en",
+  "vertical": "emergency plumber",
+
+  "_competitors_comment": "Name the competitors you want to study — a NAME is enough ('Acme Plumbing'); a domain or URL works too, in any case. The tool resolves each one via a web search to its verified domain (for Google), its Facebook Page (for Meta), and its full registered LinkedIn name, then shows a RESOLUTION REPORT and STOPS so you can confirm before any money is spent. Supply competitor_names, competitor_domains, or both. Supply neither (only seed_terms) to discover competitors first.",
+  "competitor_names": ["Acme Plumbing", "Best Drains Plumbing"],
+  "competitor_domains": [],
+  "seed_terms": ["emergency plumber chicago", "24 hour plumber", "drain cleaning near me"],
+
+  "resolution_confirmed": false,
+  "_resolution_confirmed_comment": "Safety gate. The first run resolves competitors and STOPS with a report. Review competitors/resolution.json; correct any wrong `use` value; then either re-run (it reuses the resolution) or set this to true to skip the gate on a reviewed config.",
+
+  "meta_search_terms": [],
+  "_meta_search_terms_comment": "OPTIONAL keyword market-sweep for Meta. Leave EMPTY for normal use — Meta is scraped by each competitor's own Facebook Page (their actual ads). Fill this ONLY when you deliberately want a whole-market keyword sweep instead of specific advertisers (it returns every advertiser bidding on the term, not just your competitors).",
+
+  "budget_caps": { "phase1": 10.0 },
+
+  "meta_limit_per_source": 200,
+  "google_max_items": 2000,
+  "_scope_caps_comment": "Bound cost per run. meta_limit_per_source = max Meta ads per advertiser Page (or per search URL in sweep mode); google_max_items = max Google ads per run. Lower them for a cheap trial run (e.g. 20 / 30); the defaults suit a full competitor sweep.",
+
+  "include_linkedin": true,
+  "linkedin_max_items": 100,
+  "linkedin_countries": [],
+  "_linkedin_comment": "LinkedIn Ad Library (LI stage, scrapesage/linkedin-ad-library-scraper). Scoped to each competitor by their NUMERIC LinkedIn company id, which is resolved for you (free, no login) from the company's public LinkedIn page during the resolution step — you do not supply it. This is deliberate: the Ad Library's name/keyword search is fuzzy and returns OTHER advertisers, so only the numeric id gives the right company. If resolution cannot find a competitor's id, the LinkedIn stage is SKIPPED for that competitor (never a wrong-target scrape) and the resolution report shows a warning. Searched WORLDWIDE by default — linkedin_countries is an optional filter, leave it empty unless you need it. linkedin_max_items caps ads per competitor. Set include_linkedin:false to skip.",
+
+  "download_creatives": true,
+  "ocr_google_text": true,
+  "vision_ocr_model": "",
+  "ocr_top_fraction": 0.2,
+  "_ocr_top_fraction_comment": "OCR runs only on this top fraction of Google ads ranked by how long they ran (duration = profitability proxy). 0.2 = top 20%. Raise to transcribe more ads; lower to reduce time.",
+
+  "stages": []
+}
