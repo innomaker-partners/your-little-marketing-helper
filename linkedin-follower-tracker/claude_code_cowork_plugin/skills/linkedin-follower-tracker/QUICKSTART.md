@@ -81,6 +81,37 @@ Copied from `config/FOLLOWER_CONFIG.example.json` when you run `--init`.
 | `csv_name` | No | `"followers - {date}"` | Name template for the Followers CSV. `{date}` is replaced with `YYYY-MM-DD`. |
 | `enrich_list_name` | No | `"linkedin-follower-tracker enrichment {date} {time}"` | Name template for the org-storage enrichment list. `{date}` and `{time}` make each list uniquely named so a same-day re-run never collides. |
 | `adds_per_launch` | No | `500` | How many profiles the scraper processes per launch. Leave at 500 unless your phantom is configured differently. |
+| `active_master_name` | No | `"active master - {date}"` | Name template for the active-only master CSV. `{date}` is replaced with `YYYY-MM-DD`. This file contains only active followers (unfollowers excluded) with the `lost_on` column dropped, matching the Google Sheet format. |
+| `notification` | No | see below | Object controlling which elements appear in the one-line push. When absent the default element list is used. See **Notification elements** below. |
+
+### Notification elements
+
+The `notification` block in `config.json` controls what appears in the one-line push
+notification. Example:
+
+```json
+"notification": {
+  "elements": ["active_total", "new_total", "new_in_target", "in_target_active_total"]
+}
+```
+
+When the block is absent, the default element list above is used. Unknown tokens are
+silently skipped so a typo never crashes the pipeline.
+
+| Token | What it shows |
+|---|---|
+| `active_total` | Current active follower count (default) |
+| `new_total` | New followers this run (default) |
+| `new_in_target` | New followers in ICP segments this run (default) |
+| `in_target_active_total` | Total active ICP-segment followers (default) |
+| `per_segment_active` | Active count per ICP segment, e.g. "Insurance 803, Manufacturing 69" |
+| `per_segment_new` | New followers per ICP segment this run |
+| `net` | Signed net change (+N or -N); note: diverges from active-count change when followers return |
+| `lost` | Lost follower count this run |
+
+Net and lost are not in the default push because the push speaks the ACTIVE-only model.
+They are always in the full log (`notification.txt`). A `notification` block is asked for
+once at the start of a new subject and persisted so repeatable workflows never re-ask.
 
 ---
 
@@ -141,6 +172,7 @@ All outputs land in the subject directory:
 | Path | What it is |
 |---|---|
 | `master.csv` | The running follower history. Every run's new followers are appended; every lost follower gets a `lost_on` date. Never edit by hand. |
+| `active master - <date>.csv` | Active-only snapshot: same as `master.csv` but with unfollowers excluded and the `lost_on` column dropped. Matches the Google Sheet format. Name is controlled by `active_master_name` in `config.json`. |
 | `Followers - <date>.csv` | This run's new followers, enriched and classified. One file per run. |
 | `notification.json` | `{"message": "...", "report": "..."}`: the send-ready push payload. The `message` key is the one-line push to send; `report` is the multi-line text. |
 | `notification.txt` | The multi-line report text (same as `report` in notification.json). Useful for reading the workdir directly without parsing JSON. |

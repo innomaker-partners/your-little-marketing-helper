@@ -460,6 +460,255 @@ def init_workdir(workdir, mode, *, dest=None, backend: str = "fake", cold_start:
     print(f"  seeded master.csv from '{mode}' prior state: {len(prev)} rows")
 
 
+def _read_capture(workdir, name) -> "str | None":
+    """Read a single value from workdir/captures/<name>.json. Returns None if absent.
+
+    In subject-dir mode, `workdir` here should be _dest (the durable dir) because
+    captures go to the durable dir via make_capture_sink(_dest). The caller is responsible
+    for passing the right root; this helper just reads from <workdir>/captures/<name>.json.
+    """
+    cap = Path(workdir, "captures", f"{name}.json")
+    if not cap.exists():
+        return None
+    try:
+        data = json.loads(cap.read_text())
+        val = data.get("value")
+        return str(val) if val else None
+    except (ValueError, OSError):
+        return None
+
+
+def _launch_pending_path(durable, stage):
+    """Path for the launch-pending marker for the given stage ("collect" or "enrich")."""
+    return Path(durable, "captures", f"{stage}_launch_pending.json")
+
+
+def _mark_launch_pending(durable, stage, container_id):
+    """Write a launch-pending marker. Called by --launch-only after a phantom is launched.
+    Cleared only by a successful --attach fetch. Prevents double-charge if --launch-only
+    is invoked again before the first container is resolved.
+
+    Written ATOMICALLY (temp file + os.replace, an atomic same-dir rename on POSIX): a
+    plain write truncates-then-writes, so a crash mid-write could leave an empty/partial
+    marker that _read_launch_pending would parse as 'no launch pending' and wave a second
+    paid launch through. os.replace guarantees the marker at its path is either the prior
+    state or the complete new one — never a half-written file."""
+    p = _launch_pending_path(durable, stage)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"stage": stage, "container_id": container_id,
+                          "ts": round(time.time(), 1)})
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(payload)
+    os.replace(str(tmp), str(p))
+
+
+def _read_launch_pending(durable, stage):
+    """Return the pending container id, or None if no marker / corrupt marker."""
+    p = _launch_pending_path(durable, stage)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text())
+        cid = data.get("container_id")
+        return str(cid) if cid else None
+    except (ValueError, OSError):
+        return None
+
+
+def _clear_launch_pending(durable, stage):
+    """Remove the launch-pending marker. Idempotent (ignores missing file)."""
+    try:
+        _launch_pending_path(durable, stage).unlink()
+    except (FileNotFoundError, OSError):
+        pass
+
+
+def _guard_no_pending_launch(durable, stage):
+    """Refuse to launch a paid phantom if one is already pending for this stage.
+
+    Raises SystemExit with an operator-actionable message naming the pending container,
+    directing to --attach, and explaining that a deliberate relaunch requires manually
+    deleting the marker (so a double-charge can never happen accidentally).
+
+    Fail CLOSED on a corrupt marker: if the marker file EXISTS but does not parse (empty,
+    truncated, or missing/blank container_id), a paid launch may still be in flight, so we
+    refuse rather than wave a second launch through. Only a genuinely absent marker allows
+    a launch. (_read_launch_pending returns None for both 'absent' and 'corrupt', so the
+    guard checks existence separately to tell them apart.)"""
+    marker = _launch_pending_path(durable, stage)
+    if not marker.exists():
+        return  # no launch pending — safe to launch
+    cid = _read_launch_pending(durable, stage)
+    if cid is None:
+        # Marker present but unreadable/incomplete — a phantom may be in flight.
+        raise SystemExit(
+            f"REFUSED: a '{stage}' launch marker exists but is unreadable or incomplete "
+            f"({marker}). A paid phantom may already be in flight — launching now could "
+            f"start a SECOND one. Check the PhantomBuster console; if nothing is pending, "
+            f"delete the marker to proceed:\n    rm {marker}")
+    raise SystemExit(
+        f"REFUSED: a '{stage}' phantom is already in flight (container {cid}). "
+        f"Launching again would start a SECOND paid phantom and orphan the first "
+        f"(which continues running and charging the account). "
+        f"To continue the launched run: --stage {stage} --attach\n"
+        f"To deliberately relaunch after confirming the first container failed, "
+        f"delete the marker first:\n    rm {marker}")
+
+
+def stage_collect_launch_only(workdir, client, collector_id, cookie):
+    """Launch the collector phantom and exit. The container id is captured to disk;
+    use --stage collect --attach in a later invocation to poll and fetch the result.
+    Invariant: this path NEVER waits or fetches. The guarantee is structural: it calls
+    launch_collector (which only launches), then exits."""
+    from pb_client import CAP_COLLECTOR_CONTAINER_ID
+    container_id = client.launch_collector(collector_id, cookie)
+    write_status(workdir, state="launched", stage="collect",
+                 container_id=container_id)
+    print(f"  [collect] launched collector container {container_id}")
+    print(f"  Container id captured to captures/{CAP_COLLECTOR_CONTAINER_ID}.json")
+    print(f"  Resume with: --stage collect --attach")
+    return container_id
+
+
+def stage_collect_attach(workdir, client, *, dest=None, max_polls=60, poll_interval=30.0):
+    """Attach to a previously-launched collector. Reads the container id from the
+    durable capture, polls container_status in a bounded loop, and:
+    - finished: fetches the result, writes current_followers.json, exits normally
+    - still running after max_polls: writes status(running), EXIT 0
+    - failed-ish: raises PBStop (money spent, phantom failed — do not relaunch)
+    - missing capture: SystemExit (no container to attach to — likely not launched yet)
+
+    Invariant: this path NEVER calls launch or launch_collector. Only container_status
+    and fetch_result are called here.
+
+    workdir = ephemeral; dest = durable (captures live there). When dest is None,
+    dest == workdir (backward compat / --workdir-only mode).
+    """
+    if dest is None:
+        dest = workdir
+    from pb_client import CAP_COLLECTOR_CONTAINER_ID, CAP_COLLECTOR_RESULT
+    container_id = _read_capture(dest, CAP_COLLECTOR_CONTAINER_ID)
+    if not container_id:
+        raise SystemExit(
+            f"REFUSED: --stage collect --attach but no collector container id found in "
+            f"{dest}/captures/{CAP_COLLECTOR_CONTAINER_ID}.json. "
+            f"Run --stage collect --launch-only first.")
+    print(f"  [collect/attach] polling container {container_id}...", flush=True)
+    for i in range(max_polls):
+        status = client.container_status(container_id)
+        print(f"    poll {i + 1}/{max_polls}: {status}", flush=True)
+        write_status(workdir, state="attaching", stage="collect",
+                     container_id=container_id, poll=i + 1, container_status=status)
+        if status == "finished":
+            records = client.fetch_result(container_id)
+            client._capture(CAP_COLLECTOR_RESULT, records)
+            _write(workdir, "current_followers.json", records)
+            write_status(workdir, state="done", stage="collect")
+            if not records:
+                print("  WARNING: attach fetched 0 followers from a finished container "
+                      "— this is abnormal; verify the collector ran correctly before "
+                      "trusting this run.")
+            print(f"  [collect/attach] fetched {len(records)} followers -> current_followers.json")
+            return records
+        if status == "failed-ish":
+            raise PBStop(
+                f"collector container {container_id} finished with a non-zero exit code. "
+                f"The phantom failed — do NOT relaunch (money may already be spent). "
+                f"Inspect the PhantomBuster console for container {container_id}.")
+        client.sleep(poll_interval)
+    # Exhausted polls — still running
+    write_status(workdir, state="running", stage="collect",
+                 container_id=container_id, message="still running after max polls")
+    print(f"  [collect/attach] container {container_id} still running after "
+          f"{max_polls} polls. Check back later with --stage collect --attach.",
+          flush=True)
+    return None
+
+
+def stage_enrich_launch_only(workdir, client, scraper_id, cookie):
+    """Launch the scraper against the prepared list and exit. Reads enrich_prepared.json
+    for the list_id and expected count, then calls launch_scraper and exits. The container
+    id is captured to disk.
+    Invariant: this path NEVER waits or fetches."""
+    from pb_client import CAP_SCRAPER_CONTAINER_ID
+    prepared_path = Path(workdir, "enrich_prepared.json")
+    if not prepared_path.exists():
+        raise SystemExit(
+            f"REFUSED: --stage enrich --resume-scrape --launch-only but no prepared list "
+            f"at {prepared_path}. Run --stage enrich --stop-before-scrape first. "
+            f"(If that prepare step reported 'no new followers to enrich', there is "
+            f"nothing to scrape — skip the scraper steps and continue with "
+            f"--stage classify, then --stage report.)")
+    prep = json.loads(prepared_path.read_text())
+    list_id, expected = prep["list_id"], prep["expected"]
+    print(f"  [enrich/launch-only] launching scraper against list {list_id} "
+          f"({expected} leads)...", flush=True)
+    container_id = client.launch_scraper(scraper_id, list_id, cookie, expected)
+    write_status(workdir, state="launched", stage="enrich",
+                 container_id=container_id)
+    print(f"  [enrich/launch-only] launched scraper container {container_id}")
+    print(f"  Resume with: --stage enrich --attach")
+    return container_id
+
+
+def stage_enrich_attach(workdir, client, *, dest=None, max_polls=60, poll_interval=30.0):
+    """Attach to a previously-launched scraper. Reads the container id from the durable
+    capture, polls container_status in a bounded loop, and:
+    - finished: calls fetch_scraper_result, writes enrichment.json, exits normally
+    - still running after max_polls: writes status(running), EXIT 0
+    - failed-ish: raises PBStop
+    - missing capture: SystemExit
+
+    Invariant: this path NEVER calls launch or launch_scraper.
+
+    workdir = ephemeral; dest = durable (captures live there). When dest is None,
+    dest == workdir (backward compat / --workdir-only mode).
+    """
+    if dest is None:
+        dest = workdir
+    from pb_client import CAP_SCRAPER_CONTAINER_ID
+    container_id = _read_capture(dest, CAP_SCRAPER_CONTAINER_ID)
+    if not container_id:
+        raise SystemExit(
+            f"REFUSED: --stage enrich --attach but no scraper container id found in "
+            f"{dest}/captures/{CAP_SCRAPER_CONTAINER_ID}.json. "
+            f"Run --stage enrich --resume-scrape --launch-only first.")
+
+    # Also need the new_followers list to merge enrichment at the end (same as resume_scrape)
+    new = _read(workdir, "new_followers.json", [])
+    prepared_path = Path(workdir, "enrich_prepared.json")
+
+    print(f"  [enrich/attach] polling container {container_id}...", flush=True)
+    for i in range(max_polls):
+        status = client.container_status(container_id)
+        print(f"    poll {i + 1}/{max_polls}: {status}", flush=True)
+        write_status(workdir, state="attaching", stage="enrich",
+                     container_id=container_id, poll=i + 1, container_status=status)
+        if status == "finished":
+            scraped = client.fetch_scraper_result(container_id)
+            # Consume the prepared marker (same as resume_scrape path)
+            if prepared_path.exists():
+                prepared_path.unlink()
+            enriched = P.prepare_enrichment(new, scraped)
+            _write(workdir, "enrichment.json", enriched)
+            write_status(workdir, state="done", stage="enrich")
+            print(f"  [enrich/attach] enriched {len(enriched)} followers -> enrichment.json")
+            return enriched
+        if status == "failed-ish":
+            raise PBStop(
+                f"scraper container {container_id} finished with a non-zero exit code. "
+                f"The phantom failed — do NOT relaunch (money may already be spent). "
+                f"Inspect the PhantomBuster console for container {container_id}.")
+        client.sleep(poll_interval)
+    # Exhausted polls — still running
+    write_status(workdir, state="running", stage="enrich",
+                 container_id=container_id, message="still running after max polls")
+    print(f"  [enrich/attach] container {container_id} still running after "
+          f"{max_polls} polls. Check back later with --stage enrich --attach.",
+          flush=True)
+    return None
+
+
 def stage_collect(workdir, client, collector_id, cookie):
     followers = client.collect_followers(collector_id, cookie)
     _write(workdir, "current_followers.json", followers)
@@ -478,7 +727,20 @@ def stage_diff(workdir, *, dest=None):
     lost = P.find_lost_followers(current, master)
     _write(workdir, "new_followers.json", new)
     _write(workdir, "lost_followers.json", lost)
-    print(f"  diff: {len(new)} new, {len(lost)} lost (against {len(master)} master rows)")
+    # Reactivation set: master rows that previously had lost_on and are now back in the
+    # current pull. Computed here (where both current and master are in hand) and passed
+    # forward to apply_diff via stage_report — passing computed results forward rather than
+    # re-deriving downstream is the pattern this codebase uses.
+    current_keys = {P.normalise_key(f.get("profileLink")) for f in current}
+    current_keys.discard("")
+    reactivated = [
+        P.normalise_key(r.get("profileUrl"))
+        for r in master
+        if r.get("lost_on") and P.normalise_key(r.get("profileUrl")) in current_keys
+    ]
+    _write(workdir, "reactivated.json", reactivated)
+    print(f"  diff: {len(new)} new, {len(lost)} lost, {len(reactivated)} reactivated "
+          f"(against {len(master)} master rows)")
     return new, lost
 
 
@@ -523,7 +785,10 @@ def stage_enrich(workdir, client, scraper_id, cookie, *,
     # --- prepare-only: build + verify the list, then STOP before the paid launch ------
     if stop_before_scrape:
         if not lead_inputs:
-            print("  no new followers to enrich; nothing to prepare.")
+            print("  no new followers to enrich; nothing to prepare. Skip the scraper "
+                  "steps (--resume-scrape / --attach) and continue with --stage classify, "
+                  "then --stage report — the report still marks lost followers and "
+                  "updates the master.")
             return []
         list_id = client.prepare_enrichment_list(lead_inputs)
         _write(workdir, "enrich_prepared.json",
@@ -544,6 +809,22 @@ def stage_enrich(workdir, client, scraper_id, cookie, *,
     print(f"  enriched {len(enriched)} new followers "
           f"({len(scraped)} enriched leads via org-storage list)")
     return enriched
+
+
+def resolve_classifier(explicit: "str | None", backend: str) -> str:
+    """Backend-aware default for --classifier; an explicit flag always wins.
+
+    WHY: the dev stub (dev_classify_answer) keyword-matches industry text into
+    plausible-looking labels that coerce_label then maps into the user's real taxonomy —
+    output that LOOKS like model judgment but isn't. A paid real run that silently used
+    it would deliver pseudo-classifications as if they were real: if the runbook does not
+    pass --classifier and the default is stub, a by-the-book real run classifies with the
+    stub. An omitted flag therefore resolves
+    by backend: 'real' -> the real claude classifier; every synthetic backend -> the
+    stub, keeping the free rehearsal free (no claude CLI, no cost)."""
+    if explicit:
+        return explicit
+    return "claude" if backend == "real" else "stub"
 
 
 def stage_classify(workdir, classifier_mode="stub", model="haiku", taxonomy_path=None):
@@ -668,7 +949,8 @@ def _write_done_marker(workdir, container_id: "str | None") -> None:
                                   "ts": round(time.time(), 1)}))
 
 
-def stage_report(workdir, mode, taxonomy_path=None, subject_label=None, *, dest=None):
+def stage_report(workdir, mode, taxonomy_path=None, subject_label=None, *,
+                 dest=None, notif_config=None, active_master_name=None):
     """workdir = ephemeral work dir (classified, lost, status, summary, run_complete,
     master pre-write backup); dest = durable subject dir (master.csv, Followers csv,
     notification files, captures, idempotency markers). When dest is None (backward
@@ -680,6 +962,7 @@ def stage_report(workdir, mode, taxonomy_path=None, subject_label=None, *, dest=
     _report_container_id = _check_append_idempotency(workdir, dest=dest)
     classified = _read(workdir, "classified.json", [])
     lost = _read(workdir, "lost_followers.json", [])
+    reactivated = _read(workdir, "reactivated.json", [])
     master = P.read_master(_master_path(dest).read_text())
     # Mass-loss circuit-breaker (money path). `master` here is the PRE-diff baseline (this
     # stage writes the updated master below), so we can measure what this run is about to do
@@ -716,7 +999,8 @@ def stage_report(workdir, mode, taxonomy_path=None, subject_label=None, *, dest=
     scrape_round = date.today().strftime("%d.%m.%Y.")
     for rec in classified:
         rec["scrapeRound"] = scrape_round
-    final = P.apply_diff(master, classified, lost, lost_on=run_date)
+    final = P.apply_diff(master, classified, lost, lost_on=run_date,
+                         reactivate_keys=reactivated)
     # pre-write backup: copy current dest master to temp work dir BEFORE overwriting.
     # A crash during the atomic write leaves the durable master intact (the temp file is
     # discarded); the backup at this deterministic path also allows manual restore.
@@ -734,18 +1018,31 @@ def stage_report(workdir, mode, taxonomy_path=None, subject_label=None, *, dest=
     # Followers csv is DURABLE — written to dest.
     followers_name = f"Followers - {run_date}.csv"
     Path(dest, followers_name).write_text(P.write_master(classified))
-    summary = P.collect_summary(final, classified, lost_count=len(lost),
+    # active-only master: same columns as master except lost_on is dropped, and only
+    # rows with an empty lost_on are included. Matches the format the owner maintains in
+    # Google Sheets. DURABLE — written to dest alongside the full master and the Followers
+    # CSV. Name is templated: {date} is replaced with the run date (same convention as
+    # csv_name). The full retain-and-mark master is unchanged — this is ADDITIONAL.
+    # active_master_name follows the same convention as csv_name: the template does not
+    # carry the .csv extension — we append it so the convention is consistent.
+    _active_master_tmpl = active_master_name or "active master - {date}"
+    _active_master_file = _active_master_tmpl.replace("{date}", run_date) + ".csv"
+    Path(dest, _active_master_file).write_text(P.write_active_master(final))
+    summary = P.collect_summary(final, classified, lost_count=newly_lost,
+                                reactivated_count=len(reactivated),
                                 taxonomy=load_taxonomy(taxonomy_path))
     # subject_label (from FOLLOWER_CONFIG.json) is added to the summary so the notification
-    # message can prefix it (e.g. "ACME CEO — LinkedIn followers: ..."). When absent the
+    # message can prefix it (e.g. "ACME CEO, LinkedIn followers: ..."). When absent the
     # generic "LinkedIn followers" prefix is used — backward-compatible with no config.
     if subject_label:
         summary["subject_label"] = subject_label
     # summary.json is ephemeral — written to work. Notification files are DURABLE — to dest.
     _write(workdir, "summary.json", summary)
-    text = notify.deliver(summary, Path(dest))
-    print(f"  master.csv now {len(final)} rows ({sum(1 for r in final if P._is_active(r))} active)")
+    text = notify.deliver(summary, Path(dest), notif_config)
+    active_count = sum(1 for r in final if P._is_active(r))
+    print(f"  master.csv now {len(final)} rows ({active_count} active)")
     print(f"  wrote '{followers_name}' ({len(classified)} new followers, enriched + classified)")
+    print(f"  wrote '{_active_master_file}' ({active_count} active-only rows, lost_on dropped)")
     print("  --- notification ---")
     for line in text.splitlines():
         print(f"    {line}")
@@ -755,7 +1052,7 @@ def stage_report(workdir, mode, taxonomy_path=None, subject_label=None, *, dest=
     # push here (it also sits in notification.json['message']) so the waking deliverer
     # sends it verbatim without re-deriving it.
     print(f"  NOTIFY (send as Claude app notification): "
-          f"{notify.build_notification_message(summary)}")
+          f"{notify.build_notification_message(summary, notif_config)}")
     # idempotency marker: written LAST, only on full success. A crash anywhere above
     # (master write, Followers csv write, notify) leaves no marker, so a legitimate retry
     # is not refused. The ordering guarantee: this line is the final side-effect before
@@ -777,8 +1074,10 @@ def main():
     ap.add_argument("--stage", choices=["collect", "diff", "enrich", "classify", "report", "all"],
                     default="all")
     ap.add_argument("--running-polls", type=int, default=1)
-    ap.add_argument("--classifier", choices=["stub", "claude"], default="stub",
-                    help="stub = offline deterministic; claude = real Haiku subagent")
+    ap.add_argument("--classifier", choices=["stub", "claude"], default=None,
+                    help="stub = offline deterministic; claude = real Haiku subagent. "
+                         "Omitted: resolves to claude for --backend real, stub otherwise "
+                         "— a paid run must never silently classify with the dev stub")
     ap.add_argument("--model", default="haiku")
     ap.add_argument("--collector-runtime", type=float, default=0.0,
                     help="seconds the synthetic collector phantom takes (models ~1h, compressed)")
@@ -800,6 +1099,20 @@ def main():
                     help="enrich stage only: skip prepare and run ONLY the paid scraper "
                          "launch against the list prepared earlier "
                          "(workdir/enrich_prepared.json).")
+    ap.add_argument("--launch-only", action="store_true",
+                    help="Cowork ephemeral-safe: launch the paid phantom and EXIT "
+                         "immediately without waiting or fetching. The container id is "
+                         "captured to captures/. Resume with --attach. Valid only "
+                         "with --stage collect OR --stage enrich --resume-scrape.")
+    ap.add_argument("--attach", action="store_true",
+                    help="Cowork ephemeral-safe: read the captured container id, poll "
+                         "container_status in a bounded loop, fetch on finished, EXIT 0 "
+                         "on still-running. Valid only with --stage collect or --stage "
+                         "enrich. Invariant: never calls launch.")
+    ap.add_argument("--attach-max-polls", type=int, default=1,
+                    help="maximum status polls per --attach invocation (default 1; "
+                         "re-invoke on still-running). Keep small for Cowork (each poll "
+                         "is ~poll-interval seconds of wall time).")
     ap.add_argument("--config", default=None,
                     help="path to FOLLOWER_CONFIG.json for this subject. Required for "
                          "--backend real. Optional for fake/http: when given, csv_name, "
@@ -834,6 +1147,22 @@ def main():
         sys.exit("--stop-before-scrape / --resume-scrape apply only to --stage enrich")
     if args.stop_before_scrape and args.resume_scrape:
         sys.exit("--stop-before-scrape and --resume-scrape are mutually exclusive")
+
+    # Launch-only and attach guards: valid stages, mutual exclusion.
+    # Backend-aware classifier default: an explicit --classifier always wins; an
+    # omitted one resolves to the REAL classifier on a real run, stub on synthetic ones.
+    args.classifier = resolve_classifier(args.classifier, args.backend)
+
+    if args.launch_only and args.attach:
+        sys.exit("--launch-only and --attach are mutually exclusive")
+    if args.launch_only and args.stage not in ("collect", "enrich"):
+        sys.exit("--launch-only is only valid with --stage collect or --stage enrich "
+                 "(with --resume-scrape)")
+    if args.launch_only and args.stage == "enrich" and not args.resume_scrape:
+        sys.exit("--launch-only --stage enrich requires --resume-scrape (to know which "
+                 "list to launch against)")
+    if args.attach and args.stage not in ("collect", "enrich"):
+        sys.exit("--attach is only valid with --stage collect or --stage enrich")
 
     # resolve effective subject dir (from --subject-dir or --parent+--subject).
     # When set, it overrides args.workdir for all subsequent path resolution so the rest of
@@ -927,6 +1256,12 @@ def main():
         _fcfg.get("enrich_list_name", "") or
         "linkedin-follower-tracker enrichment {date} {time}", _now)
     _subject_label = str(_fcfg.get("subject_label", "")).strip() or None
+    # notification block: {"elements": [...]} — governs which tokens appear in the push.
+    # When absent the default element list is used (see notify.DEFAULT_NOTIFICATION_ELEMENTS).
+    _notif_config: "dict | None" = _fcfg.get("notification") or None
+    # active_master_name: template for the active-only master file. {date} is replaced
+    # with the run date. When absent, defaults to "active master - {date}".
+    _active_master_name: "str | None" = _fcfg.get("active_master_name") or None
 
     # when subject-dir is active, resolve taxonomy from the hidden state dir if the
     # user hasn't supplied one explicitly on the command line.
@@ -956,7 +1291,7 @@ def main():
                  cold_start=args.cold_start)
     write_status(_work, state="starting", stage=args.stage, backend=args.backend)
 
-    needs_client = args.stage in ("collect", "enrich", "all")
+    needs_client = args.stage in ("collect", "enrich", "all") or args.attach or args.launch_only
     client = collector_id = scraper_id = cookie = None
     cleanup = lambda: None
     if needs_client:
@@ -974,9 +1309,52 @@ def main():
         print(f"Running stage='{args.stage}' backend='{args.backend}' mode='{args.mode}'",
               flush=True)
         summary = None
+
+        # --- Cowork ephemeral-safe: launch-only and attach paths ---
+        if args.launch_only:
+            if args.stage == "collect":
+                print("[collect/launch-only] launching phantom and exiting...", flush=True)
+                _guard_no_pending_launch(_dest, "collect")
+                cid = stage_collect_launch_only(_work, client, collector_id, cookie)
+                _mark_launch_pending(_dest, "collect", cid)
+            else:  # enrich --resume-scrape
+                print("[enrich/launch-only] launching scraper and exiting...", flush=True)
+                _guard_no_pending_launch(_dest, "enrich")
+                cid = stage_enrich_launch_only(_work, client, scraper_id, cookie)
+                _mark_launch_pending(_dest, "enrich", cid)
+            print("LAUNCHED -- run again with --attach to poll and fetch.", flush=True)
+            return
+
+        if args.attach:
+            if args.stage == "collect":
+                print("[collect/attach] attaching to launched collector...", flush=True)
+                result = stage_collect_attach(
+                    _work, client, dest=_dest,
+                    max_polls=args.attach_max_polls,
+                    poll_interval=args.poll_interval)
+                if result is not None:
+                    _clear_launch_pending(_dest, "collect")
+                if result is None:
+                    # Still running — exit 0, re-invoke later
+                    return
+            else:  # enrich
+                print("[enrich/attach] attaching to launched scraper...", flush=True)
+                result = stage_enrich_attach(
+                    _work, client, dest=_dest,
+                    max_polls=args.attach_max_polls,
+                    poll_interval=args.poll_interval)
+                if result is not None:
+                    _clear_launch_pending(_dest, "enrich")
+                if result is None:
+                    return
+            print("ATTACH-DONE -- phantom fetched successfully.", flush=True)
+            return
+
+        # --- Standard paths (persistent machine / one-shot) ---
         if args.stage in ("collect", "all"):
             print("[collect] launching phantom, then staying alive until it finishes...",
                   flush=True)
+            _guard_no_pending_launch(_dest, "collect")
             stage_collect(_work, client, collector_id, cookie)  # → ephemeral work
         if args.stage in ("diff", "all"):
             print("[diff]", flush=True)
@@ -991,11 +1369,13 @@ def main():
             else:
                 print("[enrich] launching scraper phantom, staying alive until it "
                       "finishes...", flush=True)
+            if not args.stop_before_scrape:
+                _guard_no_pending_launch(_dest, "enrich")
             stage_enrich(_work, client, scraper_id, cookie,  # → ephemeral work
                          stop_before_scrape=args.stop_before_scrape,
                          resume_scrape=args.resume_scrape)
         if args.stage in ("classify", "all"):
-            print("[classify]", flush=True)
+            print(f"[classify] classifier={args.classifier}", flush=True)
             stage_classify(_work, args.classifier, args.model,  # → ephemeral work
                            taxonomy_path=args.taxonomy)
         if args.stage in ("report", "all"):
@@ -1003,7 +1383,9 @@ def main():
             summary = stage_report(_work, args.mode,  # ephemerals in work, durables to dest
                                    taxonomy_path=args.taxonomy,
                                    subject_label=_subject_label,
-                                   dest=_dest)
+                                   dest=_dest,
+                                   notif_config=_notif_config,
+                                   active_master_name=_active_master_name)
         # Wake signal: durable marker + a clear line. In Claude Code the background-task
         # completion notification wakes the conversation; the marker lets a scheduled
         # re-check learn the outcome without having watched the run.

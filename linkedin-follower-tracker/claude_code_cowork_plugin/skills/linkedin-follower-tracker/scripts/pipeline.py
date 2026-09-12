@@ -433,7 +433,7 @@ def build_label_counts(master_final_rows: list[dict], active_only: bool = True) 
 
 
 def collect_summary(master_final_rows: list[dict], new_records: list[dict],
-                    lost_count: int, taxonomy: dict) -> dict:
+                    lost_count: int, taxonomy: dict, *, reactivated_count: int = 0) -> dict:
     """
     Ports the Collect Summary node with dynamic label keys, plus the per-segment breakdown.
     new_connections_total is the count of CURRENT (active, not-lost)
@@ -461,6 +461,7 @@ def collect_summary(master_final_rows: list[dict], new_records: list[dict],
         "new_connections_total": active_total,
         "net_increase_total": len(new_records) - lost_count,
         "lost_connections": lost_count,
+        "reactivated_count": reactivated_count,
         "label_counts": label_counts,
         "new_label_counts": new_label_counts,
         "in_target_active_total": in_target_active_total,
@@ -517,19 +518,50 @@ def write_master(rows: list[dict]) -> str:
     return buf.getvalue()
 
 
+# MASTER_COLUMNS without the retention-marker column — matches the format the owner
+# maintains in Google Sheets, where unfollowers are deleted rather than marked.
+ACTIVE_MASTER_COLUMNS: list[str] = [c for c in MASTER_COLUMNS if c != "lost_on"]
+
+
+def write_active_master(rows: list[dict]) -> str:
+    """Serialise only the ACTIVE (not-lost) rows to CSV, with the lost_on column dropped.
+
+    An additional standing output alongside the full
+    retain-and-mark master — matches the format the owner maintains in Google Sheets
+    (unfollowers are excluded entirely; no lost_on column). The full master is unchanged.
+    Rows are active when lost_on is empty or absent (_is_active). Unknown keys are dropped;
+    missing keys are written blank."""
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=ACTIVE_MASTER_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        if _is_active(row):
+            writer.writerow({c: row.get(c, "") for c in ACTIVE_MASTER_COLUMNS})
+    return buf.getvalue()
+
+
 def apply_diff(
     master_rows: list[dict],
     new_records: list[dict],
     lost_rows: list[dict],
     lost_on: str,
+    *,
+    reactivate_keys: "list[str] | None" = None,
 ) -> list[dict]:
     """
     Produce the next master state: mark each lost row with `lost_on` (idempotent —
-    a row already marked keeps its first date), and append the new records. Keyed
-    on normalise_key(profileUrl). Returns a new list; does not mutate inputs.
+    a row already marked keeps its first date), clear `lost_on` for returning followers,
+    and append the new records. Keyed on normalise_key(profileUrl). Returns a new list;
+    does not mutate inputs.
 
     `lost_on` is passed in (never computed here) so the function stays pure and the
     date is controllable in tests — no clock dependency.
+
+    `reactivate_keys` is computed by stage_diff (which has both the current pull and
+    the master in hand) and passed forward here — the diff already knows the current
+    follower set, so re-detecting returners downstream would be brittle re-derivation.
+    A returning follower is NOT in new_records (find_new_followers excludes all master
+    keys) so the reactivation must be handled here against the existing master rows.
 
     Append is idempotent: a new_record whose key is already present in the
     master is silently dropped — never appended again. In the normal single-run path
@@ -543,6 +575,8 @@ def apply_diff(
     """
     lost_keys = {normalise_key(r.get("profileUrl")) for r in lost_rows}
     lost_keys.discard("")
+    reactivate = set(reactivate_keys) if reactivate_keys else set()
+    reactivate.discard("")
 
     out: list[dict] = []
     # Build master key set over ALL rows (active and lost) BEFORE appending, so a key
@@ -552,8 +586,11 @@ def apply_diff(
 
     for row in master_rows:
         r = dict(row)
-        if normalise_key(r.get("profileUrl")) in lost_keys and not r.get("lost_on"):
+        key = normalise_key(r.get("profileUrl"))
+        if key in lost_keys and not r.get("lost_on"):
             r["lost_on"] = lost_on
+        elif key in reactivate and r.get("lost_on"):
+            r["lost_on"] = ""
         out.append(r)
 
     for rec in new_records:

@@ -186,10 +186,16 @@ class PhantomBusterFake:
         return {"status": status, "containerId": container_id, "output": ""}
 
     def containers_fetch(self, container_id: str, with_output: bool = False) -> dict:
-        """Mirror GET /containers/fetch: the container's terminal facts, including the
-        `exitCode` (0 = clean) the client checks after status='finished'. Modeled because
-        the real API decouples exitCode from the fetch-output status — the very gap the
-        client's _assert_container_succeeded closes.
+        """Mirror GET /containers/fetch: advances through the container's status timeline
+        so the ATTACH path can poll status via containers/fetch alone — it has a container_id
+        from the durable capture but no agent_id to call agents/fetch-output.
+
+        The advance mirrors fetch_output's motion exactly, which means:
+        - ATTACH path: each call to containers/fetch steps through starting→running→finished,
+          returning {id, status} until finished, then adding {exitCode, endType}.
+        - ALL-IN-ONE path: wait_for_finish exhausts the timeline via fetch_output first;
+          when _assert_container_succeeded then calls containers_fetch, pos is already at the
+          'finished' end (clamped), so the extra call is idempotent. exitCode is returned.
 
         FAITHFUL to the REAL response (verified live 2026-09-02): the base response carries
         {id, status, exitCode, endType} and NO lastEndMessage/lastEndStatus. The failure
@@ -200,9 +206,16 @@ class PhantomBusterFake:
         c = self._containers.get(container_id)
         if not c:
             return {}
+        # Advance the timeline exactly as fetch_output does, so the ATTACH-path callers
+        # (container_status → containers_fetch) see a live lifecycle, not always "finished".
+        status = c["timeline"][c["pos"]]
+        if c["pos"] < len(c["timeline"]) - 1:
+            c["pos"] += 1   # advance toward finished; clamp at the end (stays finished)
         code = c.get("exit_code", 0)
-        resp = {"id": container_id, "status": "finished", "exitCode": code,
-                "endType": "finished"}
+        resp = {"id": container_id, "status": status}
+        if status == "finished":
+            resp["exitCode"] = code
+            resp["endType"] = "finished"
         if with_output:
             resp["output"] = c.get("exit_message", "") or (
                 "Process finished successfully" if code == 0

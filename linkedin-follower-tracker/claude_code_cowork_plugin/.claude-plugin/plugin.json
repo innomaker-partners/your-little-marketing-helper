@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "linkedin-follower-tracker",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Track LinkedIn follower growth: collect new and lost followers, enrich with company data, classify by ICP segment, and send a push notification summary.",
   "author": {
     "name": "InnoMaker Partners"

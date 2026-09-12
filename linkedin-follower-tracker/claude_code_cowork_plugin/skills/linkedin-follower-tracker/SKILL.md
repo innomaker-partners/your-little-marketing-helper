@@ -31,6 +31,13 @@ never retries; you must not be double-charged.
 Full config-field reference is in
 `${CLAUDE_PLUGIN_ROOT}/skills/linkedin-follower-tracker/QUICKSTART.md`.
 
+**Running in Cowork: default to the cloud workspace.** Run this skill in the Cowork
+cloud sandbox unless the user specifically wants the output files written directly to
+a path on their own machine without a copy-back step, in which case prefer the Mac's
+connected local folder. In all other cases, the cloud workspace is simpler and
+requires no local path setup. Before the first real run in Cowork, complete the
+egress allowlist step in `${CLAUDE_PLUGIN_ROOT}/docs/SETUP.md`.
+
 ## Step 0: Set up a subject (intake)
 
 Ask the user two things: **where to keep this subject's files** (a parent
@@ -136,6 +143,38 @@ every synthetic one as lost. The seed is the one step you always run for real
 throwaway `--parent` directory you can delete, never in the subject you actually
 track.
 
+## Step 3b: Configure the push notification (first run only)
+
+Before the first tracking run, check whether `config.json` already has a `notification`
+block (it looks like `"notification": {"elements": [...]}` inside the JSON).
+
+If the block is **absent**: ask the user which elements they want in their one-line push
+notification. Present the recommended defaults and explain what each does:
+
+- `active_total`: current active follower count (recommended, default)
+- `new_total`: new followers this run (recommended, default)
+- `new_in_target`: new followers in ICP segments this run (recommended, default)
+- `in_target_active_total`: total active ICP-segment followers (recommended, default)
+- `per_segment_active`: active count per ICP segment, e.g. "Insurance 803, Manufacturing 69"
+- `per_segment_new`: new per ICP segment this run
+- `net`: signed net change (+N or -N); note: diverges from active-count change when followers return
+- `lost`: lost follower count this run
+
+The full list of available tokens is in QUICKSTART.md.
+
+After they choose, **offer to persist the choice** into `config.json` as the `notification`
+block. If they say yes, write or update `config.json` with their chosen elements list.
+Example block to add:
+
+```json
+"notification": {
+  "elements": ["active_total", "new_total", "new_in_target", "in_target_active_total"]
+}
+```
+
+If the block is **already present** (a configured, repeatable subject), do not ask; use
+it as-is. The block was persisted precisely so re-runs of this subject never re-ask.
+
 ## Step 4: A tracking run
 
 After the seed, every subsequent run is a full tracking run: collect, diff, enrich,
@@ -153,23 +192,95 @@ pipeline through to notification.json. Use it to confirm the pipeline is wired u
 and your config is readable before spending credits. Show the user the output.
 Only proceed to the real run after they confirm it looks right.
 
+**If running in Cowork: run the pre-flight probe first.** Before the paid run, run
+the probe from `${CLAUDE_PLUGIN_ROOT}/docs/SETUP.md` (the "Pre-flight probe" section
+under "Running in Cowork"). It confirms the sandbox can reach `api.phantombuster.com`
+before any credits are involved. A `401` response is the success signal. A connection
+error means egress is not yet open; fix it and re-run the probe before continuing.
+
 **Real tracking run (only after explicit approval):**
+
+In Cowork's cloud workspace each session is ephemeral: the process is killed after
+a few minutes of inactivity. A single `--stage all` run would be interrupted mid-phantom
+and the result discarded. Use the **launch-and-attach** sequence below instead: each
+step exits on its own, and you re-invoke to check back. The phantom keeps running on
+PhantomBuster's servers regardless of what happens to your Cowork session.
+
+**The correct sequence for a real Cowork run:**
+
+```
+# 1. Launch the collector phantom, then EXIT immediately (do not wait).
+#    The container id is captured to captures/. This is the only call that
+#    spends money for the collect stage; do not run it again.
+PB_LIVE=1 python3 ${CLAUDE_PLUGIN_ROOT}/skills/linkedin-follower-tracker/scripts/run_pipeline.py \
+  --subject-dir <subject-dir> --stage collect --launch-only --backend real
+
+# 2. Check back (run this repeatedly, every 10-20 minutes, until you see
+#    "ATTACH-DONE"). With --attach-max-polls 1 each invocation exits immediately
+#    after one poll, Cowork-safe. Never shows "still running" forever.
+PB_LIVE=1 python3 ${CLAUDE_PLUGIN_ROOT}/skills/linkedin-follower-tracker/scripts/run_pipeline.py \
+  --subject-dir <subject-dir> --stage collect --attach --attach-max-polls 1 --backend real
+
+# 3. When --attach prints "ATTACH-DONE", run the diff stage (no PhantomBuster call).
+PB_LIVE=1 python3 ${CLAUDE_PLUGIN_ROOT}/skills/linkedin-follower-tracker/scripts/run_pipeline.py \
+  --subject-dir <subject-dir> --stage diff --backend real
+
+# 4. Prepare the enrichment list (no PhantomBuster call, just creates the list).
+PB_LIVE=1 python3 ${CLAUDE_PLUGIN_ROOT}/skills/linkedin-follower-tracker/scripts/run_pipeline.py \
+  --subject-dir <subject-dir> --stage enrich --stop-before-scrape --backend real
+
+# 5. Launch the scraper phantom, then EXIT immediately.
+PB_LIVE=1 python3 ${CLAUDE_PLUGIN_ROOT}/skills/linkedin-follower-tracker/scripts/run_pipeline.py \
+  --subject-dir <subject-dir> --stage enrich --resume-scrape --launch-only --backend real
+
+# 6. Check back every 10-20 minutes until "ATTACH-DONE".
+PB_LIVE=1 python3 ${CLAUDE_PLUGIN_ROOT}/skills/linkedin-follower-tracker/scripts/run_pipeline.py \
+  --subject-dir <subject-dir> --stage enrich --attach --attach-max-polls 1 --backend real
+
+# 7. Classify (real Haiku subagent; on a real run the classifier defaults to
+#    claude, the flag just makes it explicit) and report. No PhantomBuster calls.
+PB_LIVE=1 python3 ${CLAUDE_PLUGIN_ROOT}/skills/linkedin-follower-tracker/scripts/run_pipeline.py \
+  --subject-dir <subject-dir> --stage classify --classifier claude --backend real
+PB_LIVE=1 python3 ${CLAUDE_PLUGIN_ROOT}/skills/linkedin-follower-tracker/scripts/run_pipeline.py \
+  --subject-dir <subject-dir> --stage report --backend real
+```
+
+**Key rules for this sequence:**
+- Each `--launch-only` call is a one-time paid action. **Never repeat it.** If the
+  container id is already in `captures/`, the launch already happened.
+- Each `--attach` call is free (it only polls PhantomBuster's status endpoint). Run it
+  as many times as needed until "ATTACH-DONE".
+- There is no ETA. PhantomBuster's queue time is variable. Check back on your own
+  schedule; the phantom runs independently.
+- **If step 4 prints "no new followers to enrich"**, skip steps 5 and 6 entirely:
+  there is nothing to scrape this run. Continue with step 7: classify and report must
+  still run (the report marks lost followers and updates the master).
+- If `--attach` prints `STOPPED (money-path rule):`, the phantom failed. See the
+  STOP rule below; do not relaunch.
+
+**If running on a persistent machine** (not Cowork, not ephemeral), the all-in-one
+form is fine and simpler:
 
 ```bash
 PB_LIVE=1 python3 ${CLAUDE_PLUGIN_ROOT}/skills/linkedin-follower-tracker/scripts/run_pipeline.py \
-  --subject-dir <subject-dir> --stage all --backend real
+  --subject-dir <subject-dir> --stage all --classifier claude --backend real
 ```
 
-The run has two long halves: **collect** (the Follower Collector phantom runs on
-PhantomBuster, typically around 1 hour) and then **enrich** (the Profile Scraper
-runs, typically around 40 minutes). The script stays alive throughout, printing a
-heartbeat line every ~30 seconds. Let it run. Do not interrupt it.
+The run has two long halves: **collect** (typically around 1 hour) and then **enrich**
+(typically around 40 minutes). The script stays alive throughout, printing a heartbeat
+every ~30 seconds.
 
 **If the run prints `STOPPED (money-path rule):` at any point:** stop. Do not
 re-run. The error message explains what happened and names any paid data already
 captured in `captures/`. Inspect it, fix the root cause, and bring the question
 to the user. Never auto-retry on a stop. PhantomBuster may have already processed
 the job once and re-running would charge twice.
+
+After a stop, a LATER launch attempt may print `REFUSED: ... already in flight`.
+That refusal is deliberate: the failed run's launch-pending marker is still on disk,
+protecting against an accidental second charge. The refusal message names the exact
+marker file to delete once the user has confirmed in the PhantomBuster console that
+the phantom is truly dead.
 
 ## Step 5: Deliver the result
 

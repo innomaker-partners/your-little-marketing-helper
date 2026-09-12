@@ -1,9 +1,15 @@
 {
-  "_comment": "Copy this file to your subject's run directory as config.json and fill in the real values. The PhantomBuster API key is NOT here; it comes from the PHANTOMBUSTER_API_KEY environment variable (see scripts/.env.example). This file holds per-subject identity: which phantoms to run, how to name their outputs, and an optional label for the notification message.",
+  "_comment": "Copy this file to your subject's run directory as config.json and fill in the real values. The PhantomBuster API key is NOT here; it comes from the PHANTOMBUSTER_API_KEY environment variable (see scripts/.env.example). This file holds per-subject identity: which phantoms to run, how to name their outputs, and optional labels and notification settings.",
   "subject_label": "ACME CEO",
   "collector_id": "YOUR_COLLECTOR_AGENT_ID",
   "scraper_id": "YOUR_SCRAPER_AGENT_ID",
   "csv_name": "followers - {date}",
   "enrich_list_name": "linkedin-follower-tracker enrichment {date} {time}",
-  "adds_per_launch": 500
+  "adds_per_launch": 500,
+  "_comment_active_master_name": "Name for the active-only master CSV written each run (unfollowers excluded, lost_on column dropped). {date} is replaced with the run date (YYYY-MM-DD). Defaults to 'active master - {date}' when absent.",
+  "active_master_name": "active master - {date}",
+  "_comment_notification": "Controls which elements appear in the one-line push notification. Remove this block to use the default (active_total, new_total, new_in_target, in_target_active_total). Available tokens: active_total, new_total, new_in_target, in_target_active_total, per_segment_active, per_segment_new, net, lost. Unknown tokens are silently skipped. See QUICKSTART.md for details.",
+  "notification": {
+    "elements": ["active_total", "new_total", "new_in_target", "in_target_active_total"]
+  }
 }

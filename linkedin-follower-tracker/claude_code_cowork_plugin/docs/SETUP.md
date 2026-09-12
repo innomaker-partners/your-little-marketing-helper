@@ -18,18 +18,77 @@ The `claude` CLI on PATH is required for the ICP classification stage.
 
 ---
 
-## Running in Cowork
+## Running in Cowork: allow the domains this tool uses (one-time)
 
-In Cowork's sandbox, outbound network calls are blocked until you allow them. On
-the first real run, approve **network egress** so the tool can reach:
+If you run this tool inside Cowork, the first run can fail before PhantomBuster is
+ever called, with a network or connection error and **nothing charged**. This is not
+a bug in the tool. Cowork sandboxes block outbound network by default. The fix is
+to allow egress for a small, specific set of domains before any real run.
 
-- `api.phantombuster.com`, for every PhantomBuster launch, poll, and org-storage call
-- the result-file URLs PhantomBuster returns for large collector and scraper outputs
-  (signed download links on PhantomBuster's storage domain)
+1. Open **Settings > Capabilities** in Cowork.
+2. Turn on **Allow network egress**.
+3. Add the domains listed below. Do **not** use "All domains".
+4. Run the pre-flight probe below to confirm the connection is open.
+5. Then proceed with setup.
 
-The free `--backend fake` rehearsal makes no outbound calls, so it runs without any
-egress approval. Classification shells out to the local `claude` CLI, which must be
-available inside the Cowork environment.
+**The domains to allow.** PhantomBuster runs your phantoms on its own servers, so
+the sandbox itself never touches LinkedIn directly. What the sandbox reaches on its
+own is a small set:
+
+- **`api.phantombuster.com`** (certain): every PhantomBuster call goes here,
+  including launching phantoms, polling for results, fetching output, and all
+  org-storage list and lead operations. This is the one entry you can be confident
+  of on any run.
+- **`api.anthropic.com`** (allow if the classifier CLI needs egress in your
+  environment): the ICP classification step shells out to the `claude` CLI. In some
+  Cowork environments that CLI makes outbound calls to reach the model; in others it
+  is satisfied locally. Add this domain if classification fails with a network error
+  after the PhantomBuster stages succeed.
+- **PhantomBuster's result-storage host** (confirm on your first large run): when a
+  collector or scraper run returns many rows, PhantomBuster returns a signed URL to a
+  file on its result-storage service rather than returning the data inline. The
+  sandbox fetches that URL directly. The exact hostname appears in the URL the tool
+  prints at the fetch step. Allow it if that step fails with a connection error. Do
+  not guess the hostname; wait until you see it in a run.
+
+**Why not "All domains".** These phantoms run entirely on your PhantomBuster account
+and nothing flows back except the follower and job-title data you asked for. "All
+domains" gives no benefit but is needlessly broad. The set above is everything the
+sandbox actually reaches; allowing exactly it keeps your egress tight.
+
+---
+
+### Pre-flight probe
+
+Run this once in the Cowork sandbox before any real run. It checks that the sandbox
+can reach PhantomBuster. It uses no credentials, costs nothing, and takes under five
+seconds. A `401` response is the expected success signal: PhantomBuster rejected the
+credentialless request, which means the connection itself is open. Any connection
+error means egress is still blocked.
+
+```bash
+python3 -c "
+import urllib.request, urllib.error, sys
+try:
+    urllib.request.urlopen('https://api.phantombuster.com/api/v2/agents/fetch-output', timeout=5)
+    print('Reachable.')
+except urllib.error.HTTPError as e:
+    # ANY HTTP status means the connection got through and PhantomBuster answered
+    # (a keyless request is expected to be rejected, typically 401). Egress is open.
+    print('Reachable (PhantomBuster answered with HTTP', str(e.code) + '); egress is open.')
+except Exception as e:
+    print('Network blocked:', e)
+    print('Fix: Settings > Capabilities > Allow network egress, then add api.phantombuster.com')
+    sys.exit(1)
+"
+```
+
+If the probe exits cleanly, the sandbox is ready for a real run. If it prints
+"Network blocked", re-check the egress settings and re-run the probe before touching
+the live pipeline.
+
+The free `--backend fake` rehearsal makes no outbound calls and runs with no egress
+setup at all. Run it first even once egress is confirmed.
 
 ---
 

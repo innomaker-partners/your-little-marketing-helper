@@ -420,6 +420,38 @@ class PhantomBusterClient:
             return pointer.get("jsonUrl") or pointer.get("csvURL") or None
         return None
 
+    def container_status(self, container_id: str) -> str:
+        """Single non-blocking status poll: GET /containers/fetch → one of
+        'starting' | 'running' | 'finished' | 'failed-ish'.
+
+        'finished' means the container exited with code 0 (clean success); 'failed-ish'
+        means the container is done but exited non-zero (e.g. a stale session produced
+        exit 87). In both cases the phantom is no longer running. 'starting' and
+        'running' mean the phantom is still in progress.
+
+        Read-only, no cost, no capture. Used by the ATTACH path to check whether a
+        previously-launched phantom has finished, without waiting for it in-process.
+        Invariant: this method NEVER launches a phantom. The attach path calls this, then
+        fetch_result or fetch_scraper_result — never self.launch.
+        """
+        info = self.t.get("/api/v2/containers/fetch", {"id": container_id})
+        if not info:
+            return "starting"   # container not yet visible (just launched)
+        status = info.get("status") or "starting"
+        if status == STATUS_FINISHED:
+            exit_code = info.get("exitCode")
+            # Only exit code 0 is proven success. A non-zero exit (e.g. 87, a stale
+            # LinkedIn session) OR a missing exitCode on a finished container is not proof
+            # the work succeeded — treat both as 'failed-ish' so the attach path STOPs,
+            # matching _assert_container_succeeded on the all-in-one path. Money-path rule:
+            # never trust an unproven paid result, and never let the attach and all-in-one
+            # paths disagree on the same container. (PB reports an exitCode on finish in
+            # practice; the None branch is defence against an API anomaly.)
+            if exit_code in (0, "0"):
+                return "finished"
+            return "failed-ish"
+        return status
+
     # ----- high-level operations, one per pipeline stage -----
 
     def fetch_agent_session(self, agent_id: str) -> dict:
@@ -460,10 +492,18 @@ class PhantomBusterClient:
                     "identityId": self.identity_id}
         return self.fetch_agent_session(agent_id)
 
-    def collect_followers(self, agent_id: str,
-                          session_cookie: str | None = None) -> list[dict]:
-        """Launch the follower collector and return its follower list. The session is
-        fetched live from the agent unless session_cookie overrides it."""
+    def launch_collector(self, agent_id: str,
+                         session_cookie: str | None = None) -> str:
+        """Launch-and-detach half of collect_followers. Builds the argument, posts the
+        launch, captures the container id, and returns immediately — NO wait, NO fetch.
+
+        This is the Cowork-safe entry point for the collect stage: launch the phantom
+        in one process invocation (Cowork exits after this), then reattach via
+        container_status + fetch_result in a later invocation. Because only this method
+        (and collect_followers, which delegates here) may call self.launch for the
+        collector, the no-double-charge rule is enforced structurally — the attach
+        path calls fetch_result, never self.launch.
+        """
         sess = self._resolve_session(agent_id, session_cookie)
         if not sess.get("sessionCookie"):
             raise PBStop(f"collector agent {agent_id} has no session cookie to launch "
@@ -480,11 +520,22 @@ class PhantomBusterClient:
         if self.csv_name:
             argument["csvName"] = self.csv_name
         container_id = self.launch(agent_id, argument)
-        # Capture the paid handle BEFORE the long wait: if the process dies mid-wait,
-        # the container id is on disk and the follower pull can be fetched from the
-        # console. This is the whole capture-once point — the collector's output lives
-        # ONLY on this container, so losing the id loses the pull.
+        # Capture the paid handle the instant it arrives — BEFORE any wait. If the
+        # process is killed/suspended after this line, the container id is on disk and
+        # the reattach path can read it without relaunching.
         self._capture(CAP_COLLECTOR_CONTAINER_ID, container_id)
+        return container_id
+
+    def collect_followers(self, agent_id: str,
+                          session_cookie: str | None = None) -> list[dict]:
+        """Launch the follower collector and return its follower list. The session is
+        fetched live from the agent unless session_cookie overrides it.
+
+        All-in-one path: delegates to launch_collector (the paid launch + capture), then
+        waits and fetches in the same process. This is the persistent-machine path; for
+        an ephemeral Cowork sandbox use launch_collector + container_status + fetch_result
+        across separate invocations."""
+        container_id = self.launch_collector(agent_id, session_cookie)
         try:
             self.wait_for_finish(agent_id)
             # Same guard as the scraper: a collector can report status='finished' while
@@ -615,6 +666,100 @@ class PhantomBusterClient:
               file=sys.stderr, flush=True)
         return list_id
 
+    def launch_scraper(self, agent_id: str, list_id: str,
+                       session_cookie: str | None = None,
+                       expected: int | None = None) -> str:
+        """Launch-and-detach half of scrape_enrichment_list. Resolves the session,
+        optionally re-verifies the list count (when expected is given), builds the
+        argument, posts the launch, captures the container id, and returns immediately —
+        NO wait, NO read-back.
+
+        This is the Cowork-safe entry point for the enrich stage's paid step: launch in
+        one process invocation, then reattach via container_status + fetch_scraper_result
+        in a later invocation. Because only this method (and scrape_enrichment_list, which
+        delegates here) may call self.launch for the scraper, the no-double-charge
+        rule is enforced structurally.
+
+        `expected`: when the list was prepared in an earlier run, pass the expected count
+        so the list is RE-verified still complete before spending any money. Omit when
+        called straight from prepare_enrichment_list (already verified there).
+        """
+        sess = self._resolve_session(agent_id, session_cookie)
+        # Size the paid launch to the list's ACTUAL contents (so the scraper covers every
+        # lead, never a subset), and — when resuming a list prepared in an earlier run —
+        # RE-verify it still resolves to the expected count before spending. Free read.
+        present = (self._wait_list_resolves(list_id, expected)
+                   if expected is not None else self.fetch_list_leads(list_id))
+        if expected is not None and len(present) < expected:
+            raise PBStop(
+                f"prepared enrichment list {list_id} now resolves "
+                f"{len(present)}/{expected} leads; STOP before a paid partial scrape.")
+        list_count = len(present)
+        argument = {
+            # The org-storage list reference the scraper accepts is the by-list
+            # RESOURCE PATH, not a bare id: `org-storage://leads/by-list/<listId>`.
+            # Verified live 2026-09-01: the bare `org-storage://<listId>` form is
+            # rejected at load with exit 1 "Unsupported protocol org-storage:", while
+            # this form loads the list and proceeds to LinkedIn. The input field's
+            # own regex accepts both, so the regex is NOT the source of truth — the
+            # runtime is. This is the exact string the phantom UI writes when a real
+            # list is selected.
+            "spreadsheetUrl": f"org-storage://leads/by-list/{list_id}",
+            "enrichWithCompanyData": True,
+            "numberOfAddsPerLaunch": max(self.adds_per_launch, list_count),
+            # Faithful to the n8n scraper launch (verified against the live workflow,
+            # 2026-09-01). pushResultToCRM is the load-bearing one: in PhantomBuster
+            # the "CRM" IS the org-storage Leads DB, so this flag is what makes the
+            # scraper WRITE its enrichment back onto the leads — which is exactly what
+            # our by-list read-back below reads. n8n sends true; without it the scrape
+            # could enrich yet persist nothing and fetch_list_leads would come back
+            # bare. updateMonitoringMetadata / crmOutputFieldsMapping are sent exactly
+            # as n8n sends them. `columnName` is deliberately NOT sent: the scraper
+            # hides it for org-storage input and reads the lead's structured URL
+            # instead, so it is a no-op here, not a gap.
+            "updateMonitoringMetadata": False,
+            "pushResultToCRM": True,
+            "crmOutputFieldsMapping": [],
+        }
+        argument.update(self._scraper_session_args(sess))
+        container_id = self.launch(agent_id, argument)   # this spends money
+        # Capture the paid handle the instant it arrives — BEFORE any wait. The container
+        # id is the reattach handle; losing it means the paid run is unrecoverable.
+        self._capture(CAP_SCRAPER_CONTAINER_ID, container_id)
+        return container_id
+
+    def fetch_scraper_result(self, container_id: str,
+                             expected: int | None = None) -> list[dict]:
+        """Read-back half of scrape_enrichment_list. Asserts the container succeeded,
+        fetches its output, captures the enriched leads, and returns them.
+
+        Launch-free: NEVER calls self.launch. This is what the ATTACH path calls after
+        container_status confirms the phantom finished cleanly. `expected` is accepted for
+        API symmetry but currently not used for validation (the result count reflects
+        what the scraper actually produced, which may legitimately differ from expected
+        when a lead had no public profile to scrape).
+        """
+        # status='finished' is NOT proof the scrape worked: check the container's
+        # exitCode before trusting the leads. A stale LinkedIn session finishes with
+        # exit 87 yet leaves the leads bare, so reading them back here would report
+        # pre-existing/stale data as fresh enrichment. STOP first.
+        self._assert_container_succeeded(container_id)
+        # Read the enrichment from the SCRAPER'S OWN container output (the resultObject),
+        # NOT from the org-storage leads. This restores n8n fidelity: the workflow's
+        # "Prepare Enrichment Data" reads "Get the output of an agent1" — the scraper
+        # container output — which carries the FULL scrape, including the deep company-
+        # page fields (linkedinCompanyName / Description / FollowerCount / EmployeesCount
+        # / Size / Headquarter / Specialities). The org-storage by-list read-back was a
+        # Google-Sheets -> org-storage porting artifact that persisted only a SUBSET:
+        # verified live 2026-09-02 that a real scraper container carried the deep fields
+        # 8/10 while the same leads read back via by-list carried them 0/10. pushResultToCRM
+        # still writes the leads (so prepare's re-verify and the failure-salvage read work);
+        # the success read simply takes the richer source. fetch_result handles the large-
+        # output URL branch, exactly as the collector's read does.
+        enriched = self.fetch_result(container_id)
+        self._capture(CAP_SCRAPER_LEADS, enriched)
+        return enriched
+
     def scrape_enrichment_list(self, agent_id: str, list_id: str, *,
                                session_cookie: str | None = None,
                                expected: int | None = None) -> list[dict]:
@@ -631,77 +776,22 @@ class PhantomBusterClient:
         so expected is omitted. On a post-launch failure the list is KEPT (a live salvage
         handle) and a best-effort read is captured; the money-path rule still forbids an
         automatic re-launch.
-        """
-        sess = self._resolve_session(agent_id, session_cookie)
-        # Size the paid launch to the list's ACTUAL contents (so the scraper covers every
-        # lead, never a subset), and — when resuming a list prepared in an earlier run —
-        # RE-verify it still resolves to the expected count before spending. Reading the
-        # list is free.
-        present = (self._wait_list_resolves(list_id, expected)
-                   if expected is not None else self.fetch_list_leads(list_id))
-        if expected is not None and len(present) < expected:
-            raise PBStop(
-                f"prepared enrichment list {list_id} now resolves "
-                f"{len(present)}/{expected} leads; STOP before a paid partial scrape.")
-        list_count = len(present)
 
+        All-in-one path: delegates to launch_scraper (paid launch + capture), waits, then
+        delegates to fetch_scraper_result (assert + fetch + capture). For an ephemeral
+        Cowork sandbox use launch_scraper + container_status + fetch_scraper_result across
+        separate invocations.
+        """
         launched = False
         try:
-            argument = {
-                # The org-storage list reference the scraper accepts is the by-list
-                # RESOURCE PATH, not a bare id: `org-storage://leads/by-list/<listId>`.
-                # Verified live 2026-09-01: the bare `org-storage://<listId>` form is
-                # rejected at load with exit 1 "Unsupported protocol org-storage:", while
-                # this form loads the list and proceeds to LinkedIn. The input field's
-                # own regex accepts both, so the regex is NOT the source of truth — the
-                # runtime is. This is the exact string the phantom UI writes when a real
-                # list is selected.
-                "spreadsheetUrl": f"org-storage://leads/by-list/{list_id}",
-                "enrichWithCompanyData": True,
-                "numberOfAddsPerLaunch": max(self.adds_per_launch, list_count),
-                # Faithful to the n8n scraper launch (verified against the live workflow,
-                # 2026-09-01). pushResultToCRM is the load-bearing one: in PhantomBuster
-                # the "CRM" IS the org-storage Leads DB, so this flag is what makes the
-                # scraper WRITE its enrichment back onto the leads — which is exactly what
-                # our by-list read-back below reads. n8n sends true; without it the scrape
-                # could enrich yet persist nothing and fetch_list_leads would come back
-                # bare. updateMonitoringMetadata / crmOutputFieldsMapping are sent exactly
-                # as n8n sends them. `columnName` is deliberately NOT sent: the scraper
-                # hides it for org-storage input and reads the lead's structured URL
-                # instead, so it is a no-op here, not a gap.
-                "updateMonitoringMetadata": False,
-                "pushResultToCRM": True,
-                "crmOutputFieldsMapping": [],
-            }
-            argument.update(self._scraper_session_args(sess))
-            container_id = self.launch(agent_id, argument)   # this spends money
-            self._capture(CAP_SCRAPER_CONTAINER_ID, container_id)
+            container_id = self.launch_scraper(agent_id, list_id, session_cookie, expected)
             launched = True
             self.wait_for_finish(agent_id)
-            # status='finished' is NOT proof the scrape worked: check the container's
-            # exitCode before trusting the leads. A stale LinkedIn session finishes with
-            # exit 87 yet leaves the leads bare, so reading them back here would report
-            # pre-existing/stale data as fresh enrichment. STOP first.
-            self._assert_container_succeeded(container_id)
-            # Read the enrichment from the SCRAPER'S OWN container output (the resultObject),
-            # NOT from the org-storage leads. This restores n8n fidelity: the workflow's
-            # "Prepare Enrichment Data" reads "Get the output of an agent1" — the scraper
-            # container output — which carries the FULL scrape, including the deep company-
-            # page fields (linkedinCompanyName / Description / FollowerCount / EmployeesCount
-            # / Size / Headquarter / Specialities). The org-storage by-list read-back was a
-            # Google-Sheets -> org-storage porting artifact that persisted only a SUBSET:
-            # verified live 2026-09-02 that a real scraper container carried the deep fields
-            # 8/10 while the same leads read back via by-list carried them 0/10. pushResultToCRM
-            # still writes the leads (so prepare's re-verify and the failure-salvage read work);
-            # the success read simply takes the richer source. fetch_result handles the large-
-            # output URL branch, exactly as the collector's read does.
-            enriched = self.fetch_result(container_id)
-            self._capture(CAP_SCRAPER_LEADS, enriched)
             # The list is KEPT — never deleted — so every run's enriched lead set stays
             # reachable on PhantomBuster, uniquely dated, for backtracking. This holds on
-            # success and on failure alike; the only cleanup the
-            # run does is of bare DUPLICATE lead records inside the list (see _dedupe_list_leads).
-            return enriched
+            # success and on failure alike; the only cleanup the run does is of bare
+            # DUPLICATE lead records inside the list (see _dedupe_list_leads).
+            return self.fetch_scraper_result(container_id)
         except PBStop:
             # If money was spent, the leads may already carry partial enrichment: rescue
             # a best-effort read now. The list is kept regardless (a live handle to them),
