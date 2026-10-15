@@ -1,0 +1,429 @@
+/* Marketing Viewer — InnoMaker Partners design language.
+   Matches the live IMP site (innomakerpartners.com): warm cream paper, ink text, ember +
+   crimson accents, Space Grotesk display over Montserrat UI, soft 16px radius, airy whitespace.
+   Light-only by design decision (the site has no dark mode). */
+
+/* ---- fonts (local, no CDN). ---- */
+@font-face{font-family:'Space Grotesk';src:url('./fonts/space-grotesk.woff2') format('woff2');font-weight:400 700;font-display:swap}
+@font-face{font-family:'Montserrat';src:url('./fonts/montserrat.woff2') format('woff2');font-weight:400 700;font-display:swap}
+
+:root{
+  --font-head:'Space Grotesk',ui-sans-serif,system-ui,'Segoe UI',sans-serif;
+  --sans:'Montserrat',ui-sans-serif,system-ui,'Segoe UI',sans-serif;
+  /* Numbers align in tabular figures but stay in the UI face -- the site uses no monospace. */
+  --num:'Montserrat',ui-sans-serif,system-ui,sans-serif;
+
+  /* Palette — the site's own :root tokens. */
+  --paper:#F7F4F0;          /* warm cream page */
+  --paper-2:#EFE9E1;        /* recessed cream (rails, wells) */
+  --surface:#FFFFFF;        /* lifted card face */
+  --ink:#1A1917; --ink-soft:#3A3733; --muted:#6E6353; --muted-2:#938A7E;
+  --line:rgba(26,25,23,.10); --line-strong:rgba(26,25,23,.16); --line-soft:rgba(26,25,23,.06);
+  --ember:#AC470E; --ember-press:#8E3A0B; --ember-lite:#E68A54;
+  --ember-tint:#F6EBE3; --ember-tint-border:rgba(172,71,14,.24);
+  --red:#AC0E24;            /* crimson — typographic emphasis only, never a fill */
+  --creative-bg:#EFE9E1; --creative-bg-2:#E7DFD3; --track-bg:#EAE3D9; --chip-bg:#F1ECE4;
+  --rank-ghost:#D8CEC1;
+  --shadow-btn:0 1px 2px rgba(26,25,23,.10);
+
+  /* Shape & depth — soft, editorial. */
+  --radius:16px; --radius-ctl:12px; --radius-sm:8px; --radius-pill:999px;
+  --shadow:0 1px 2px rgba(26,25,23,.05), 0 1px 3px rgba(26,25,23,.04);
+  --shadow-lg:0 8px 30px rgba(26,25,23,.08);
+
+  --grain-opacity:0; --grain-blend:multiply;   /* the site has no grain texture */
+}
+
+*{box-sizing:border-box}
+/* The hidden attribute must always win: any component rule that sets display (e.g. flex)
+   silently overrides the browser's own [hidden]{display:none}. That is how the carousel
+   arrows once showed on strips that do not scroll. */
+[hidden]{display:none!important}
+html,body{margin:0;height:100%}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--sans); font-size:15px; line-height:1.6;
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+}
+a{color:inherit;text-decoration:none}
+button{font-family:var(--sans);cursor:pointer}
+input{font-family:var(--sans)}
+
+/* type utilities */
+.eb{font-family:var(--sans);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);overflow-wrap:break-word}
+.hl{font-family:var(--font-head);letter-spacing:-.02em;line-height:1.05;margin:0}
+.num{font-family:var(--num);font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
+table{overflow-wrap:anywhere;word-break:break-word}
+
+/* structure */
+.grain{display:none}
+.card{border:1px solid var(--line);background:var(--surface);border-radius:var(--radius);box-shadow:var(--shadow);display:flex;flex-direction:column;overflow:hidden;overflow-wrap:anywhere;word-break:break-word}
+.rule{height:1px;background:var(--line);width:100%}
+.spacer{flex-grow:1}
+
+/* controls */
+.ctl{height:40px;padding:0 15px;border:1px solid var(--line-strong);background:var(--surface);color:var(--ink);
+     font-weight:600;font-size:13px;display:inline-flex;align-items:center;gap:8px;border-radius:var(--radius-ctl);box-shadow:var(--shadow-btn);transition:border-color .12s,background .12s}
+.ctl:hover{border-color:var(--ink)}
+.btn-ink{height:40px;padding:0 18px;background:var(--ink);color:var(--paper);border:1px solid var(--ink);
+     font-weight:600;font-size:13px;display:inline-flex;align-items:center;gap:8px;border-radius:var(--radius-ctl);transition:opacity .12s}
+.btn-ink:hover{opacity:.88}
+.btn-ember{height:42px;padding:0 18px;background:var(--ember);color:#FFF;border:1px solid var(--ember);
+     font-weight:600;font-size:13px;display:inline-flex;align-items:center;gap:8px;border-radius:var(--radius-ctl);transition:background .12s}
+.btn-ember:hover{background:var(--ember-press);border-color:var(--ember-press)}
+.searchbox{display:flex;align-items:center;gap:10px;padding:0 15px;height:42px;border:1px solid var(--line-strong);
+     background:var(--surface);border-radius:var(--radius-pill)}
+.searchbox:focus-within{border-color:var(--ember)}
+.searchbox input{border:none;background:transparent;outline:none;font-size:14px;color:var(--ink);flex-grow:1}
+.searchbox.on-ink{border-color:var(--line-strong);background:var(--surface)}
+.searchbox.on-ink input{color:var(--ink)}
+
+/* facets */
+.facet{display:flex;align-items:center;gap:10px;padding:7px 4px;cursor:pointer;font-size:13.5px;user-select:none;border-radius:var(--radius-sm)}
+.facet:hover .box{border-color:var(--ink)}
+.box{width:17px;height:17px;border:1.5px solid var(--line-strong);border-radius:5px;flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:background .12s,border-color .12s}
+.facet.sel .box{background:var(--ember);border-color:var(--ember);color:#FFF}
+/* A facet group with many values (e.g. every advertiser) scrolls within itself
+   so the groups below it stay reachable. */
+.facet-scroll{max-height:240px;overflow-y:auto;margin:0 -4px;padding:0 4px}
+.facet-scroll .facet{align-items:flex-start}
+/* Visual language: TWO classes, four axes apart.
+   INFO TAG .tag  — flat fill, no border, 6px corners, no shadow, no hover, default cursor.
+   PILL BUTTON .pbtn — white face, visible border, small shadow, pill radius, hover darkens, pointer cursor.
+   This ensures a tag and a button can never be confused even at small sizes. */
+.tag{display:inline-flex;align-items:center;gap:5px;font-family:var(--sans);font-weight:500;font-size:11px;line-height:1.35;padding:3px 8px;border-radius:6px;background:var(--chip-bg);color:var(--ink-soft);white-space:nowrap;border:none;cursor:default}
+.tag.accent{background:var(--ember-tint);color:var(--ember-press)}
+.tag.dark{background:var(--ink);color:var(--paper)}
+.tag.unknown{background:transparent;box-shadow:inset 0 0 0 1px var(--line-strong);color:var(--muted-2)}
+.tag-k{font-size:9px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted-2)}
+.pbtn{display:inline-flex;align-items:center;gap:6px;font-family:var(--sans);font-weight:600;font-size:11.5px;line-height:1;min-height:28px;padding:0 12px;border-radius:var(--radius-pill);background:var(--surface);color:var(--ink);border:1px solid var(--line-strong);box-shadow:var(--shadow-btn);cursor:pointer;white-space:nowrap;text-decoration:none;transition:border-color .12s,box-shadow .12s}
+.pbtn:hover{border-color:var(--ink);box-shadow:0 2px 6px rgba(26,25,23,.14)}
+.pbtn:focus-visible,.ctl:focus-visible,.act:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
+.pbtn.on{background:var(--ember-tint);border-color:var(--ember);color:var(--ember-press)}
+.pbtn.current{background:var(--ink);border-color:var(--ink);color:var(--paper);cursor:default}
+
+/* cards / reviews */
+.quote{font-family:var(--font-head);font-weight:500;font-size:17px;line-height:1.42;color:var(--ink);letter-spacing:-.01em;margin:0}
+.act{width:30px;height:30px;border:1px solid var(--line-strong);border-radius:var(--radius-sm);display:flex;align-items:center;justify-content:center;cursor:pointer;background:var(--surface);color:var(--muted);box-shadow:var(--shadow-btn);transition:all .12s}
+.act:hover{border-color:var(--ink);color:var(--ink)}
+.act.on{background:var(--ember);border-color:var(--ember);color:#FFF}
+/* Note block -- the note a user jotted on this record, visible on the card without hovering.
+   Uses the ember-tint palette so it reads as "authored by you, not scraped data". */
+.notecard{background:var(--ember-tint);border:1px solid var(--ember-tint-border);border-radius:var(--radius-sm);padding:9px 12px;font-family:var(--sans);font-size:12px;color:var(--ink-soft);margin-top:10px;white-space:pre-wrap;overflow-wrap:anywhere}
+
+/* data table (keyword landscape) — editorial rhythm, not a spreadsheet:
+   soft rounded card, airy rows, a warm header band, hairline rules, row hover. */
+.dtable{width:100%;border-collapse:separate;border-spacing:0;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+/* Header labels are short words (Volume, Competition, Difficulty): never split
+   them mid-word — the global table word-break rule is for long scraped strings
+   in report tables, not for these. Multi-word labels still wrap at spaces. */
+.dtable thead th{background:var(--paper-2);border-bottom:1px solid var(--line-strong);padding:14px 16px;overflow-wrap:normal;word-break:normal}
+/* Body cells: the global table rule (overflow-wrap:anywhere) lets every letter be a break point when the
+   table sizes its columns, so the keyword column was squeezed to ~133px and keywords split mid-word.
+   break-word keeps each whole word's width as the column minimum; a single string longer than the
+   cell still breaks as a last resort, so long scraped strings cannot push the table wider. */
+.dtable tbody td{padding:16px;border-bottom:1px solid var(--line);vertical-align:middle;overflow-wrap:break-word;word-break:normal}
+.dtable td.num{white-space:nowrap}
+.dtable tbody tr:last-child td{border-bottom:none}
+.dtable tbody tr{transition:background .1s}
+.dtable tbody tr:hover{background:var(--paper-2)}
+/* Column separators: a reader misread the difficulty band chip as its own
+   column because nothing marked where a column ends. The softest hairline
+   keeps the editorial feel while binding bar + score + band into one cell. */
+.dtable thead th+th,.dtable tbody td+td{border-left:1px solid var(--line-soft)}
+
+/* meters */
+.track{position:relative;height:8px;background:var(--track-bg);overflow:hidden;border-radius:var(--radius-pill)}
+.fill{position:absolute;left:0;top:0;height:100%;border-radius:var(--radius-pill)}
+.rank{font-family:var(--font-head);font-weight:700;font-variant-numeric:tabular-nums;color:var(--rank-ghost);line-height:1;white-space:nowrap}
+/* Search tabs — editorial underline, not a segmented control: bare on the
+   masthead, ink+ember when active, no track, no fill. */
+.seg{height:34px;padding:0 2px;font-size:13px;font-weight:600;display:inline-flex;align-items:center;cursor:pointer;color:var(--muted);background:none;border:none;border-bottom:2px solid transparent;transition:color .12s,border-color .12s}
+.seg:hover{color:var(--ink)}
+.seg.on{color:var(--ink);border-bottom-color:var(--ember)}
+
+/* Disclosure (every expander): chevron + Show/Hide word, both flip when open, so the
+   control says it closes as clearly as it opens (replaces the 16px
+   triangle, which was too small and never said "close"). Button variants follow the shared
+   button style:
+   a .pbtn.disc turns ember while its panel is open; a full-width .disc-row carries a
+   raised pill on the right so the whole row reads as one clickable header. */
+.disc-state{display:inline-flex;align-items:center;gap:4px;font-weight:700;font-size:11px;color:var(--ember-press)}
+.pbtn.disc .disc-state{margin-left:4px;padding-left:8px;border-left:1px solid var(--line-strong)}
+.disc-chev{flex-shrink:0;transition:transform .15s}
+.open .disc-chev{transform:rotate(180deg)}
+.pbtn.disc.open{background:var(--ember-tint);border-color:var(--ember);color:var(--ember-press)}
+.pbtn.disc.open .disc-state{border-left-color:var(--ember-tint-border)}
+.disc-row{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;background:none;border:none;padding:2px 0;margin:0;cursor:pointer;text-align:left;font-family:var(--sans)}
+.disc-row .disc-state{min-height:26px;padding:0 10px;border-radius:var(--radius-pill);background:var(--surface);border:1px solid var(--ember-tint-border);box-shadow:var(--shadow-btn);transition:border-color .12s}
+.disc-row:hover .disc-state{border-color:var(--ember)}
+.disc-row:focus-visible{outline:2px solid var(--ember);outline-offset:4px;border-radius:4px}
+@media (prefers-reduced-motion: reduce){.disc-chev{transition:none}}
+
+/* app frame */
+#app{display:flex;height:100%;overflow:hidden}
+.region{display:flex;flex-grow:1;min-width:0;height:100%}
+/* Row wrapper inside #region for surfaces with a filter rail beside the stage.
+   A class (not inline style) so the 920px media query can stack it. */
+.runview{display:flex;flex-grow:1;min-width:0}
+.rail-camp{border-radius:var(--radius-sm)}
+.rail-camp.on{background:var(--ember-tint)}
+.rail-camp:hover{background:var(--paper-2)}
+.rail-camp.on:hover{background:var(--ember-tint)}
+.creative-missing{aspect-ratio:1.91/1;background:var(--creative-bg);display:flex;align-items:center;justify-content:center;border-bottom:1px solid var(--line);font-family:var(--sans);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted-2)}
+/* Left campaign rail — light, airy, a hairline ember edge instead of a black slab. */
+.rail{width:300px;flex-shrink:0;height:100%;background:var(--paper-2);color:var(--ink);display:flex;flex-direction:column;border-right:1px solid var(--line);overflow-y:auto}
+.filterrail{width:270px;flex-shrink:0;height:100%;background:var(--surface);border-right:1px solid var(--line);padding:26px 22px;display:flex;flex-direction:column;gap:22px;overflow-y:auto}
+.stage{flex-grow:1;height:100%;position:relative;overflow:hidden;background:var(--paper);display:flex;flex-direction:column;container-type:inline-size;container-name:stage}
+.stage-scroll{position:relative;z-index:1;flex-grow:1;overflow-y:auto}
+/* Masthead — light with an ember hairline, the site's restraint (black reserved for accents). */
+.masthead{flex-shrink:0;background:var(--surface);color:var(--ink);padding:18px 34px;display:flex;flex-wrap:wrap;align-items:center;gap:18px;border-bottom:1px solid var(--line)}
+/* The right-hand group (chips, report and Export buttons) is flex-shrink:0, so on a narrow stage it
+   used to push past the edge and squeeze the title to a few px. With wrapping it drops under the
+   title instead. The title block gets a small basis so it stays beside the back button and keeps a
+   readable width; the group sits at the right edge on its own row. Both selectors match only the
+   mastheads that carry those inline styles; mastheads that already fit are unchanged. */
+.masthead > div[style*="flex-grow:1"]{flex-basis:220px}
+.masthead > div[style*="flex-shrink:0"]{margin-left:auto}
+.iconbtn{width:36px;height:36px;border:1px solid var(--line-strong);border-radius:var(--radius-sm);display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.masthead .iconbtn{border-color:var(--line-strong)}
+
+/* markdown (reports) */
+.md{max-width:760px;color:var(--ink);overflow-wrap:anywhere;word-break:break-word}
+.md h1,.md h2,.md h3{font-family:var(--font-head);letter-spacing:-.02em;line-height:1.1;margin:1.4em 0 .5em}
+.md h1{font-size:36px;font-weight:700} .md h2{font-size:25px;font-weight:700} .md h3{font-size:18px;font-weight:600}
+.md p{margin:.7em 0;line-height:1.65} .md ul,.md ol{margin:.6em 0;padding-left:1.3em} .md li{margin:.35em 0}
+.md code{font-family:ui-monospace,Menlo,monospace;font-size:.88em;background:var(--chip-bg);padding:1px 6px;border-radius:5px}
+.md strong{font-weight:600} .md hr{border:none;border-top:1px solid var(--line);margin:1.6em 0}
+.md table{border-collapse:collapse;margin:1em 0;font-size:14px} .md th,.md td{border:1px solid var(--line);padding:7px 11px;text-align:left}
+.md th{background:var(--paper-2)}
+/* A report table holding a long unbreakable string (a creative file name, for example). The global
+   rule above lets every letter break, so such a string takes the table's width and squeezes every
+   other column into single letters. Only a table the renderer marks .has-longtok changes: short
+   cells keep whole words, the long cell (.longtok) still breaks anywhere, and the table scrolls
+   inside its own box if whole words still do not fit. Unmarked tables are untouched. */
+.md table.has-longtok{display:block;max-width:100%;overflow-x:auto}
+.md table.has-longtok th,.md table.has-longtok td{overflow-wrap:break-word;word-break:normal}
+.md table.has-longtok td.longtok{overflow-wrap:anywhere;word-break:break-word}
+.md blockquote{border-left:3px solid var(--ember);margin:1em 0;padding:.3em 0 .3em 18px;color:var(--muted)}
+
+/* report reading surface: a sticky contents rail beside the prose, plus the
+   "Reports in this run" switcher label. The rail sticks inside .stage-scroll
+   (the scroll container) so it stays visible at any scroll depth. */
+/* The band is sticky (reversing the earlier not-sticky call): the
+   report switcher and the contents toggle stay reachable at any depth. The paper-coloured
+   ring masks prose scrolling behind its rounded corners; .stuck adds depth only once the
+   reader has scrolled, so at rest it sits flat on the page. --band-h (measured in JS)
+   pushes the sticky contents rail and heading jumps below it. */
+.report-switch{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:26px;background:var(--ember-tint);border:1px solid var(--ember-tint-border);border-radius:var(--radius-ctl);padding:12px 16px;position:sticky;top:0;z-index:3;box-shadow:0 0 0 10px var(--paper);transition:box-shadow .15s}
+/* Sticky top is measured from the scroller's content edge, so the band pins 28px (the
+   stage padding) below the masthead and prose would show through that gap; this strip
+   paints the gap paper. Invisible at rest (the page there is paper anyway). */
+.report-switch::before{content:"";position:absolute;left:-11px;right:-11px;bottom:calc(100% + 1px);height:40px;background:var(--paper);pointer-events:none}
+.report-switch.stuck{box-shadow:0 0 0 10px var(--paper),0 12px 20px -10px rgba(26,25,23,.28)}
+.md h1,.md h2,.md h3{scroll-margin-top:calc(var(--band-h,0px) + var(--band-off,0px) + 20px)}
+.report-switch-lbl{font-family:var(--font-head);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-right:2px}
+.report-layout{display:flex;gap:40px;align-items:flex-start}
+.report-layout .md{flex:1 1 auto;min-width:0}
+.report-toc{position:sticky;top:calc(var(--band-h,0px) + 12px);flex:0 0 208px;max-height:calc(100vh - 170px - var(--band-h,0px));overflow-y:auto;font-family:var(--sans);font-size:12.5px;line-height:1.4}
+.report-toc .toc-title{font-family:var(--font-head);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+.report-toc .toc-link{display:block;color:var(--muted);text-decoration:none;cursor:pointer;padding:4px 0 4px 11px;border-left:2px solid var(--line);transition:color .12s,border-color .12s}
+.report-toc .toc-link:hover{color:var(--ink);border-left-color:var(--ember)}
+.report-toc .toc-h3{padding-left:23px;font-size:12px}
+
+/* Report back-to-top: reports are deep, so this is the quick way back up (the
+   sticky band keeps the switcher in reach, but not the report's opening lines).
+   Hidden until the reader has actually scrolled. */
+.backtotop{position:absolute;bottom:24px;right:28px;z-index:5;width:44px;height:44px;border-radius:999px;border:1px solid var(--line-strong);background:var(--surface);color:var(--ink);font-size:18px;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:var(--shadow-lg);opacity:0;pointer-events:none;transition:opacity .15s}
+.backtotop.show{opacity:1;pointer-events:auto}
+.backtotop:hover{border-color:var(--ink)}
+
+/* loading */
+.spin{width:26px;height:26px;border:2px solid var(--line);border-top-color:var(--ember);border-radius:999px;animation:sp 1s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion: reduce){.spin{animation:none}}
+
+/* ---- collapsible panels — kept ABOVE the media query on purpose: the
+   in-media full-width overrides share their specificity, so they only win by
+   coming later in the file. ------------------------------------------------- */
+/* Left project rail */
+.rail.rail-collapsed{width:52px;overflow:hidden}
+/* Filter rail */
+.filterrail.filterrail-collapsed{width:44px;padding:12px 8px;gap:0;overflow:hidden}
+/* Report TOC toggle — JS adds/removes this class; the media query display:none
+   below keeps it hidden at <920px regardless of toggle state (adjustable). */
+.report-toc.toc-hidden{display:none}
+
+/* responsive: collapse rails on narrow screens */
+@media (max-width:920px){
+  #app{flex-direction:column;overflow:auto}
+  /* .runview is the row flex holding the filter rail beside the stage; without
+     this it stays a row when the filter rail goes full-width and crushes the
+     stage to 0px. (.region itself stays a row: surfaces that put the stage
+     directly in it rely on row flex-grow for the stage's width.) */
+  .runview{flex-direction:column}
+  .rail,.filterrail{width:100%;height:auto;border-right:none;border-bottom:1px solid var(--line)}
+  /* In the stacked layout a collapsed rail is always full-width; its content is
+     naturally slim (just one button row) so it never shows as an empty band. */
+  .rail.rail-collapsed{width:100%}
+  .filterrail.filterrail-collapsed{width:100%;padding:8px 12px}
+  /* width:100% is load-bearing: as an inline-size container the stage cannot
+     take its width from flex stretch in the stacked (column) layout — Chromium
+     resolves it to 0 and the masonry inside degenerates. An explicit width
+     gives the container a definite inline size. */
+  .stage{height:auto;overflow:visible;width:100%}
+  .stage-scroll{overflow:visible}
+  .report-toc{display:none}
+  /* The TOC is force-hidden here, so its toggle would be a dead control. */
+  #toc-toggle-btn{display:none}
+  .report-layout{gap:0}
+}
+
+/* ---- container queries — all keyed off .stage (container-name:stage). --------
+   Replaces every window.innerWidth check. Responds to actual available space,
+   so panel collapse and window resize are the same event to the layout.
+   Thresholds are adjustable. */
+
+/* Review-wall masonry (#wall). Base: single column; widens as stage grows.
+   520px: two 248px cards fit with 18px gap; 840px: three ~268px cards fit. */
+#wall{column-count:1;column-gap:18px}
+@container stage (min-width:520px){#wall{column-count:2}}
+@container stage (min-width:840px){#wall{column-count:3}}
+
+/* Ad-library masonry (#grid). Cards are wider than review cards.
+   620px: two ~299px cards with 22px gap; 940px: three ~299px cards. */
+#grid{column-count:1;column-gap:22px}
+@container stage (min-width:620px){#grid{column-count:2}}
+@container stage (min-width:940px){#grid{column-count:3}}
+
+/* Two-column panel pairs: dossier panels and synthesis bars.
+   640px: two panels of ~311px each with 18px gap. */
+.two-up{display:grid;gap:18px;align-items:start;grid-template-columns:1fr}
+@container stage (min-width:640px){.two-up{grid-template-columns:1fr 1fr}}
+/* A lone panel (e.g. a campaign with only a search run) must not sit in a
+   half-width column — the old inline style was conditional on both panels. */
+.two-up > :only-child{grid-column:1/-1}
+/* A panel left alone on the last row also spans the width. The dossier's full-width synthesis card
+   is a sibling, so :only-child never matches; count only the panels that do not span themselves.
+   Two real panels (an even count) stay side by side. */
+.two-up > :last-child:nth-child(odd of :not([style*="grid-column"])){grid-column:1/-1}
+
+/* Snapshot-card internal histogram layout.
+   560px: left col min 220px + right col ~318px + 22px gap. */
+.snap-card-grid{display:grid;gap:22px;align-items:start;grid-template-columns:1fr}
+@container stage (min-width:560px){.snap-card-grid--hist{grid-template-columns:minmax(220px,1fr) 2fr}}
+
+/* Ad body clamp + read-more: long competitor copy is clamped at 8 lines;
+   wireReadMore reveals the toggle only when the text is actually cut
+   (measured, not guessed) — the whole point is reading the ad here
+   instead of opening the original. */
+.adbody{margin:0;font-size:13.5px;color:var(--ink-soft);line-height:1.5;display:-webkit-box;-webkit-line-clamp:8;-webkit-box-orient:vertical;overflow:hidden}
+.adbody.open{display:block;-webkit-line-clamp:none;overflow:visible}
+.readmore{background:none;border:none;padding:0;margin:0;font-family:var(--sans);font-size:12px;font-weight:600;color:var(--ember);cursor:pointer;align-self:flex-start}
+.readmore:hover{color:var(--ember-press)}
+
+/* ---- global tooltip layer ---- */
+#tip{
+  position:fixed;z-index:9999;pointer-events:none;
+  max-width:300px;padding:7px 10px;
+  background:var(--ink);color:var(--paper);
+  font-family:var(--sans);font-size:12px;line-height:1.45;font-weight:500;
+  border-radius:var(--radius-sm);box-shadow:var(--shadow-lg);
+  white-space:normal;word-break:break-word;
+}
+#tip:not([hidden]){animation:tip-in .12s ease-out both}
+@keyframes tip-in{from{opacity:0}to{opacity:1}}
+@media(prefers-reduced-motion:reduce){#tip:not([hidden]){animation:none}}
+
+/* ---- tooltip on/off switch (rail footer) ---- */
+.tip-switch .tip-track{
+  display:inline-flex;align-items:center;position:relative;
+  width:26px;height:14px;border-radius:999px;flex-shrink:0;
+  background:var(--muted-2);transition:background .12s;
+}
+.tip-switch[aria-checked="true"] .tip-track{background:var(--ember)}
+.tip-switch .tip-knob{
+  position:absolute;left:2px;top:2px;
+  width:10px;height:10px;border-radius:999px;
+  background:var(--surface);transition:left .12s;
+  box-shadow:0 1px 2px rgba(26,25,23,.2);
+}
+.tip-switch[aria-checked="true"] .tip-knob{left:14px}
+@media(prefers-reduced-motion:reduce){
+  .tip-switch .tip-track,.tip-switch .tip-knob{transition:none}
+}
+
+/* ---- inline note editor ---- */
+.noteslot{margin:0;padding:0}
+.note-editor{margin-top:10px;display:flex;flex-direction:column;gap:8px}
+.note-editor-ta{width:100%;box-sizing:border-box;min-height:60px;font-family:var(--sans);font-size:13px;border:1px solid var(--line-strong);border-radius:var(--radius-sm);padding:8px 10px;resize:vertical;background:var(--surface);color:var(--ink);line-height:1.5;transition:border-color .12s}
+.note-editor-ta:focus{outline:none;border-color:var(--ember)}
+.note-editor-footer{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.note-editor-hint{font-size:11px;color:var(--muted-2)}
+.note-editor-actions{display:flex;gap:6px;flex-wrap:wrap}
+.note-editor-del{color:var(--red)}
+.note-editor-error:not([hidden]){font-size:11px;color:var(--red);margin-top:2px}
+
+/* Horizontal strip with arrow buttons (carousel cards, dynamic-ad versions). The arrows are
+   translucent so the card beneath stays readable, but carry the usual button cues (border,
+   shadow, hover), so they read as controls. Steps are exactly one card + gap, so they land card-aligned; snap is only "proximity":
+   "mandatory" can bounce the final step (clamped to the scroll end, not a snap point) back
+   in some browsers, trapping the last cards. */
+.hscroll{position:relative}
+.hs-track{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px;scroll-snap-type:x proximity;scrollbar-width:thin}
+.hs-card{scroll-snap-align:start}
+.hs-btn{position:absolute;top:calc(50% - 3px);transform:translateY(-50%);z-index:2;width:34px;height:34px;border-radius:999px;display:flex;align-items:center;justify-content:center;padding:0;cursor:pointer;color:var(--ink);background:rgba(255,255,255,.84);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);border:1px solid var(--line-strong);box-shadow:var(--shadow-lg);transition:background .12s,border-color .12s}
+.hs-btn:hover{background:var(--surface);border-color:var(--ink)}
+.hs-btn:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
+.hs-prev{left:-8px}
+.hs-next{right:-8px}
+
+/* InnoMaker Partners promo: logo + one short line pinned to the foot of the rail (the
+   project list, Trash and the footer scroll above it). The whole block is one link to
+   the #/innomaker page. */
+.promo{flex-shrink:0;display:flex;flex-direction:column;gap:8px;padding:18px 20px 20px;border-top:1px solid var(--line);text-decoration:none;transition:background .15s}
+.promo:hover,.promo.on{background:var(--ember-tint)}
+.promo img{display:block;height:auto}
+.promo-q{font-size:12.5px;line-height:1.5;color:var(--muted)}
+.imp-intro{display:flex;gap:22px;align-items:flex-start;padding:4px 0 8px}
+.imp-intro img{flex-shrink:0;height:auto}
+.imp-sec{padding:22px 24px}
+.imp-about{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:16px 4px 0;border-top:1px solid var(--line);color:var(--ink-soft);font-size:14px}
+@container stage (max-width:520px){.imp-intro{flex-direction:column;gap:14px}}
+/* Stacked layout (rail on top): logo and line sit side by side so the block stays short. */
+@media (max-width:920px){
+  .promo{flex-direction:row;align-items:center;gap:14px;padding:12px 20px}
+  .promo img{width:96px}
+}
+
+/* Saved view banner: which named set of records is open, who saved it, and a way out. */
+.viewbanner{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px;padding:14px 16px;border:1px solid var(--ember-tint-border);border-left:3px solid var(--ember);background:var(--ember-tint);border-radius:6px}
+.viewbanner .pbtn{flex-shrink:0}
+
+/* Compare strip: thin banner above the grid showing what changed since the baseline. */
+.cmpstrip{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:18px;padding:10px 14px;background:var(--paper-2);border-radius:6px;font-size:13px;line-height:1.5}
+.cmpstrip-label{color:var(--muted)}
+.cmpstrip-basis{color:var(--muted);font-size:11px}
+.cmpstrip-dot{color:var(--muted)}
+.cmpstrip-zero{color:var(--muted-2)}
+.cmpstrip-link{color:var(--ember);text-decoration:underline;cursor:pointer}
+.cmpstrip-link.cmpstrip-active{font-weight:600;color:var(--ink);text-decoration:underline;cursor:pointer}
+.cmpstrip-nc{color:var(--muted-2);font-size:11px}
+.cmpstrip-settings{background:var(--ember);color:#fff;font-size:10px;padding:2px 6px;border-radius:4px;cursor:pointer}
+.cmpstrip-gone-banner{font-style:italic;color:var(--muted)}
+/* Used for short platform labels and for whole sentences. flex:none keeps a label at its one-line
+   width; max-width:100% lets a sentence that is wider than the row wrap inside it instead of
+   running off the edge. */
+.cmpstrip-plat{font-size:11px;color:var(--muted);white-space:normal;flex:none;max-width:100%}
+/* Per-platform detail line inside the compare strip. */
+.cmpstrip-platlist{display:flex;flex-direction:column;gap:2px;margin-top:4px;font-size:11px;color:var(--muted)}
+.cmpstrip-platrow{display:flex;align-items:baseline;gap:6px}
+
+/* Carried-marks notice: banner above the compare strip.
+   Column layout so the skip-details block sits on its own full-width line. */
+.carriednotice{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;padding:7px 12px;background:var(--paper-2);border-left:3px solid var(--muted-2);border-radius:0 6px 6px 0;font-size:12px;color:var(--muted);line-height:1.4}
+.carriednotice-row1{display:flex;align-items:center;gap:8px}
+.carriednotice-dismiss{margin-left:auto;flex-shrink:0;cursor:pointer;background:none;border:none;padding:0 4px;font-size:14px;line-height:1;color:var(--muted-2);font-family:var(--sans)}
+.carriednotice-details{font-size:12px;color:var(--muted);word-break:break-word}
+.carriednotice-details summary{cursor:pointer;color:var(--muted);padding:2px 0}
+.carriednotice-details ul{margin:4px 0 0;padding-left:18px;list-style:disc}

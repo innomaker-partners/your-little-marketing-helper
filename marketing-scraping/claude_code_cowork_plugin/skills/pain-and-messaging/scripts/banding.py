@@ -231,7 +231,7 @@ def _label_chunk(texts, model, min_match, min_batch):
         return parsed
     # Partial degradation on a wide batch: split and retry smaller.
     print(f"[banding] batch of {n} got explicit labels for only {matched}/{n} "
-          f"({matched / n:.0%} < {min_match:.0%}) -- splitting and retrying smaller")
+          f"({matched / n:.0%} < {min_match:.0%}); splitting and retrying smaller")
     mid = n // 2
     return (_label_chunk(texts[:mid], model, min_match, min_batch)
             + _label_chunk(texts[mid:], model, min_match, min_batch))
@@ -250,14 +250,14 @@ def _run_claude_labels(prompt, model):
     try:
         result = subprocess.run(cmd, input=prompt, capture_output=True, text=True)
     except FileNotFoundError:
-        print("[banding] `claude` CLI not found -- ambiguous items default to neutral.")
+        print("[banding] `claude` CLI not found, so ambiguous items default to neutral.")
         return ""
     except Exception as exc:  # noqa: BLE001
-        print(f"[banding] adjudication error: {exc} -- ambiguous default to neutral.")
+        print(f"[banding] adjudication error: {exc}; ambiguous items default to neutral.")
         return ""
     if result.returncode != 0:
-        print(f"[banding] adjudication non-zero exit ({result.returncode}) -- "
-              "ambiguous default to neutral.")
+        print(f"[banding] adjudication non-zero exit ({result.returncode}), so "
+              "ambiguous items default to neutral.")
         return ""
     return result.stdout or ""
 

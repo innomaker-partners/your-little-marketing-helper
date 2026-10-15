@@ -16,6 +16,10 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import resolve as RS  # google_ad_owners: whose Google ads are the competitors'
+import emit_index as EI  # labelled_set_aside: the set-aside ads the app shows
+import stages as ST  # linkedin_where: the LinkedIn country filter build_LI sends
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -123,13 +127,148 @@ def _cell(s):
     return str(s).replace("|", "/")
 
 
+# "the" competitor's, as the app's heading and every label under it say.
+# An ad whose search website is recorded was checked against that one competitor
+# only (resolve.google_ad_owners), and the label above its table names it; "a
+# competitor's" read as a check against every competitor in the run.
+GOOGLE_NOT_CONFIRMED_HEADING = "## Google ads not confirmed as the competitor's"
+
+
+def _labelled_section(labelled):
+    """The report's section of set-aside Google ads, under their label.
+
+    WHY ("label them"): a set-aside ad may be the competitor's
+    own under another legal name, so the reader sees what it says, but never as a
+    competitor's ad. The section is written here, by code, from the same data the
+    app shows (emit_index.labelled_set_aside): a model's summary has turned "found
+    near X" into "X's" before, and a code-written section cannot drift. It goes at
+    the end of DATA_DIGEST.md and of the E3_creative_angles.md scaffold, apart from
+    every table of a competitor's ads. [] when nothing was set aside."""
+    if not labelled or not labelled.get("ads"):
+        return []
+    out = [GOOGLE_NOT_CONFIRMED_HEADING, "",
+           "Listed for reading only. These Google ads came up when searching a "
+           "competitor's website, but the advertiser's name does not match that "
+           "competitor. They are not part of any table, count or finding elsewhere in "
+           "this report.", ""]
+    ads = labelled.get("ads") or []
+    for lab in labelled.get("labels") or []:
+        rows = [a for a in ads
+                if (a.get("set_aside") or {}).get("searched", "") == lab.get("searched", "")]
+        if not rows:
+            continue
+        out += [lab.get("label") or "", "",
+                "| # | Advertiser (as Google names it) | Format | Shown | Copy | Original ad "
+                "| Creative files |",
+                "|---|---|---|---|---|---|---|"]
+        for i, a in enumerate(rows, 1):
+            d = a.get("data") or {}
+            first, last = d.get("first_shown"), d.get("last_shown")
+            shown = (f"{first} to {last}" if first and last and first != last
+                     else first or last or "(not given)")
+            copy = " ".join(str(a.get("text") or "").split())
+            url = d.get("ad_url") or ""
+            files = ", ".join(Path(m.get("path", "")).name for m in a.get("media") or []
+                              if isinstance(m, dict) and m.get("path"))
+            out.append(
+                f"| {i} | {_cell(EI.set_aside_name(d.get('advertiser_name')))} "
+                f"| {_cell(d.get('format') or '(none)')} | {_cell(shown)} "
+                f"| {_cell(_truncate(copy, 160)) if copy else '(no copy)'} "
+                f"| {f'[open]({_cell(url)})' if url.startswith('http') else '(none)'} "
+                f"| {_cell(files) if files else '(none)'} |")
+        out.append("")
+    if labelled.get("confirm"):
+        out += [labelled["confirm"], ""]
+    return out
+
+
+def _names(items):
+    """'a', 'b' -- competitor inputs or search words, quoted as the run quotes them."""
+    return ", ".join(f"'{str(x).strip()}'" for x in items)
+
+
+def _meta_coverage_digest(cov):
+    """DATA_DIGEST lines saying what Meta did and did not search ([] when every
+    competitor was searched by its own Facebook page).
+
+    WHY: a report written from this digest said a
+    competitor "has a visible Meta blind spot" when no competitor page was on file
+    and Meta was searched by the user's words. A competitor whose own Meta ads were
+    not searched has an UNKNOWN Meta presence, and ads found by search words belong
+    to whoever used those words. The facts come from ad_intel (where the run
+    decided what Meta searches), not re-derived here."""
+    cov = cov or {}
+    not_searched = list(cov.get("not_searched") or [])
+    words = list(cov.get("words_used") or [])
+    if not not_searched:
+        return []
+    many = len(not_searched) > 1
+    lines = ["## What Meta searched", ""]
+    if words:
+        lines.append(
+            f"No competitor has a Facebook page on file, so no competitor's own Meta ads were "
+            f"searched: {_names(not_searched)}. Meta was searched by the search words "
+            f"{_names(words)} instead. The Meta records below are ads by any advertiser that "
+            f"used those words; they are not these competitors' own ads.")
+    elif cov.get("any_page"):
+        lines.append(
+            f"{_names(not_searched)} {'have' if many else 'has'} no Facebook page on file, so "
+            f"{'their' if many else 'its'} own Meta ads were not searched. The Meta records "
+            f"below come from the other competitors' Facebook pages.")
+    else:
+        lines.append(
+            f"No competitor has a Facebook page on file and no search words were set, so Meta "
+            f"was not searched for {_names(not_searched)}.")
+    lines += ["",
+              f"The Meta presence of {_names(not_searched)} is UNKNOWN, not absent: this run "
+              f"did not look. It is not evidence that {'they run' if many else 'it runs'} no "
+              f"Meta ads.",
+              "", "---", ""]
+    return lines
+
+
+def _meta_coverage_prompt(cov):
+    """PROMPT.md rules for a run where some competitor's own Meta ads were not
+    searched ([] otherwise). See _meta_coverage_digest for why."""
+    cov = cov or {}
+    not_searched = list(cov.get("not_searched") or [])
+    if not not_searched:
+        return []
+    lines = [
+        "",
+        "**What Meta did not search (read this before writing anything about Meta).**",
+        f"The own Meta ads of {_names(not_searched)} were not searched, because no",
+        "Facebook page was on file (DATA_DIGEST.md, \"What Meta searched\"). Their Meta",
+        "presence is UNKNOWN, not absent. Never write or imply that they run no Meta ads,",
+        "have a Meta gap or blind spot, are absent from Meta, or should claim or start a",
+        "Facebook presence. Say only that this run did not search their own Meta ads.",
+    ]
+    if cov.get("words_used"):
+        lines += [
+            f"The Meta records were found by the search words {_names(cov['words_used'])}:",
+            "they are ads by any advertiser that used those words, not these competitors'",
+            "own ads. Never attribute them to a competitor, and never compute yourself how",
+            "many of them, or what share or percentage, are unrelated or belong to any",
+            "competitor. About these records as a whole, state only the counts",
+            "DATA_DIGEST.md gives.",
+        ]
+    return lines
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def assemble_report(workdir, cfg):
+def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None):
     """
     Assemble the E3 report bundle into <workdir>/report/.
+
+    gap_lines: the run's own lines naming its gaps (ad_intel._gap_lines), carried
+      into DATA_DIGEST.md word for word; [] or None when the run has none.
+    meta_coverage: what the Meta stage searched, as ad_intel decided it:
+      {"not_searched": [competitor inputs whose own Meta ads were not searched],
+       "words_used": [search words Meta was searched by instead], "any_page": bool}.
+      Drives the "What Meta searched" section and the PROMPT.md rule.
 
     Reads:
       B4_meta_ad_library/run_02_full.json
@@ -151,12 +290,23 @@ def assemble_report(workdir, cfg):
     # 1. Read pipeline outputs
     # ------------------------------------------------------------------
     meta_items = _read_json(workdir / "B4_meta_ad_library" / "run_02_full.json", []) or []
-    google_items = _read_json(workdir / "B5_google_ads" / "run_02_full.json", []) or []
+    google_all = _read_json(workdir / "B5_google_ads" / "run_02_full.json", []) or []
+    # Only the competitors' own Google ads go into the digest; the
+    # others are counted and named in the Google section (resolve.google_ad_owners).
+    _entries = _read_json(workdir / "competitors" / "resolution.json", []) or []
+    _g_owner = RS.google_ad_owners(google_all, _entries)
+    google_items = [g for g, v in zip(google_all, _g_owner) if v == "own"]
+    google_aside = RS.google_set_aside_lines(google_all, _entries, _g_owner)
     li_items = _read_json(workdir / "LI_linkedin_ads" / "run_02_full.json", []) or []
     meta_manifest = _read_json(workdir / "creatives" / "meta" / "manifest.json", {}) or {}
     google_manifest = _read_json(workdir / "creatives" / "google" / "manifest.json", {}) or {}
     li_manifest = _read_json(workdir / "creatives" / "linkedin" / "manifest.json", {}) or {}
     google_ocr = _read_json(workdir / "google_ocr.json", {}) or {}
+    # The set-aside Google ads under their label, the same data the app
+    # shows (emit_index.labelled_set_aside), for the code-written closing section.
+    _not_confirmed = _labelled_section(EI.labelled_set_aside(
+        google_all, _entries, _g_owner, "", "B5_google_ads/run_02_full.json",
+        google_manifest, "creatives/google") if google_aside else None)
 
     # ------------------------------------------------------------------
     # 2. Copy the E3 template verbatim
@@ -167,9 +317,19 @@ def assemble_report(workdir, cfg):
         template_text = template_path.read_text(encoding="utf-8")
     else:
         template_text = (
-            "# E3 — Creative Angle Audit\n\n"
+            "# Creative Angle Audit\n\n"
             "(Template not found. Expected at templates/reports/E3_creative_angles.md)\n"
         )
+    # The template's two placeholders are filled here, as the pain report
+    # does for its own. They were copied through raw, so the first line the user (and
+    # the app) saw was "Creative Angle Audit ({{CLIENT}})" and "Generated: {{DATE}}".
+    # The name is the run's subject, the same one the app shows for the run. Only the
+    # exact tokens are replaced, so a template without them is written unchanged.
+    template_text = (template_text
+                     .replace("{{CLIENT}}", str((cfg or {}).get("subject") or EI._subject_from_dirname(workdir)))
+                     .replace("{{DATE}}", datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")))
+    if _not_confirmed:
+        template_text = template_text.rstrip("\n") + "\n\n" + "\n".join(_not_confirmed)
 
     (report_dir / "E3_creative_angles.md").write_text(template_text, encoding="utf-8")
 
@@ -179,24 +339,32 @@ def assemble_report(workdir, cfg):
     generated_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     lines = [
-        "# DATA_DIGEST — E3 Report Inputs",
+        "# DATA_DIGEST: report inputs",
         "",
-        "Auto-generated by ad_intel. Feed this alongside E3_creative_angles.md and",
+        "Written by the ad-intelligence tool. Feed this alongside E3_creative_angles.md and",
         "the creatives/ folder to your LLM, using PROMPT.md as the instruction.",
         "",
         f"Generated : {generated_at}",
         f"Workdir   : {workdir.resolve()}",
         f"Meta records     : {len(meta_items)}",
-        f"Google records   : {len(google_items)}",
+        f"Google records   : {len(google_items)}"
+        + (f"  ({len(google_all) - len(google_items)} more set aside, see the Google section)"
+           if len(google_all) > len(google_items) else ""),
         f"LinkedIn records : {len(li_items)}",
         "",
         "---",
         "",
     ]
+    if gap_lines:
+        lines += ["## What this run did not cover (the run's own closing lines)", ""]
+        lines += list(gap_lines)
+        lines += ["", "A source or competitor named here is a gap in what the tool collected,",
+                  "not a fact about the market.", "", "---", ""]
+    lines += _meta_coverage_digest(meta_coverage)
 
     # ---- Meta (B4) ---------------------------------------------------
     lines += [
-        "## Meta Ad Library (B4)",
+        "## Meta Ad Library",
         "",
         "Each block: advertiser | ad archive ID | main copy | cards | creative files.",
         "",
@@ -237,17 +405,41 @@ def assemble_report(workdir, cfg):
     lines += [
         "---",
         "",
-        "## Google Ads Transparency (B5)",
+        "## Google Ads Transparency",
         "",
-        ("Duration = lastShownAt − firstShownAt in days. "
+    ]
+    if google_aside:
+        # When every Google ad was set aside no table
+        # of the competitor's ads follows, so the header must not point "below".
+        lines += [("**Set aside (the advertiser's name does not match a competitor, so these "
+                   "ads are not listed below):**") if google_items else
+                  ("**Set aside (the advertiser's name does not match a competitor, so these "
+                   "ads are not shown as any competitor's; no Google ad in this run was "
+                   "counted as a competitor's own):**"), ""]
+        lines += [f"- {s}" for s in google_aside]
+        lines += [""]
+    # Name every advertiser counted as a competitor's
+    # own, so a partner or reseller counted by the whole-word rule is visible.
+    google_own = RS.google_own_lines(google_all, _entries, _g_owner)
+    if google_own:
+        lines += ["**Counted as the competitor's own (by the advertiser's name, or a name "
+                  "listed in \"google_advertisers\"):**", ""]
+        lines += [f"- {s}" for s in google_own]
+        lines += [""]
+    lines += [
+        ("Duration = days from the first to the last day Google showed the ad. "
          "Longer duration = more tested = stronger profitability signal."),
         "",
         "| # | Advertiser | Format | Duration (days) | OCR Text | Creative files |",
         "|---|-----------|--------|-----------------|----------|----------------|",
     ]
 
-    if not google_items:
-        lines.append("| — | (no Google records found) | | | | |")
+    if not google_items and google_all:
+        # Records were found, so "no Google records found" would be false.
+        lines.append("| - | (none counted as a competitor's own; every Google ad found was "
+                     "set aside, see the list above) | | | | |")
+    elif not google_items:
+        lines.append("| - | (no Google records found) | | | | |")
     else:
         for i, rec in enumerate(google_items, 1):
             if not isinstance(rec, dict):
@@ -279,20 +471,29 @@ def assemble_report(workdir, cfg):
     # ---- LinkedIn (LI) ----------------------------------------------
     lines += [
         "",
-        "## LinkedIn Ad Library (LI)",
+        "## LinkedIn Ad Library",
         "",
-        ("Real impression data (totalImpressionsMax) where LinkedIn reports it — "
+        ("Real impression counts where LinkedIn reports them: "
          "a direct performance signal unavailable from Google. "
          "Ads ranked by impressions descending within each advertiser; "
          "falls back to duration when impressions are null (common for VIDEO ads). "
-         "Duration = lastShownAt − firstShownAt."),
+         "Duration = days from the first to the last day LinkedIn showed the ad."),
         "",
     ]
 
     if not li_items:
+        # WHY: this line used to read the zero as "this advertiser may not run
+        # LinkedIn campaigns", a market claim from an empty result. In a real run (a UK-only search) the
+        # empty result came from a search limited to the UK
+        # with a scraper in maintenance. The digest feeds the report writer, so it
+        # states only what is known: nothing came back, from which countries.
+        _where = ST.linkedin_where(cfg or {})
+        _from = f" from a search limited to{_where[3:]}" if _where else ""
         lines.append(
-            "_(no LinkedIn records found — this advertiser may not run LinkedIn "
-            "campaigns, which is common for B2C / local businesses)_"
+            f"_(no LinkedIn records came back{_from}. This is unconfirmed: the tool "
+            "cannot tell a real zero from a scraper that fetched nothing, or from a "
+            "LinkedIn search that did not run. Never read it as a sign that anyone "
+            f"runs no LinkedIn ads{_where}.)_"
         )
         lines.append("")
     else:
@@ -355,6 +556,9 @@ def assemble_report(workdir, cfg):
             lines.append("")
 
     lines += ["---", ""]
+    # After every section about a competitor's ads, never inside one.
+    if _not_confirmed:
+        lines += _not_confirmed + ["---", ""]
 
     digest_text = "\n".join(lines) + "\n"
     (report_dir / "DATA_DIGEST.md").write_text(digest_text, encoding="utf-8")
@@ -363,7 +567,7 @@ def assemble_report(workdir, cfg):
     # 4. Write PROMPT.md
     # ------------------------------------------------------------------
     prompt_lines = [
-        "# PROMPT — Instructions for Your LLM",
+        "# PROMPT: instructions for your LLM",
         "",
         "Paste this file's contents as the first message to your LLM,",
         "with E3_creative_angles.md and DATA_DIGEST.md as attached context.",
@@ -375,15 +579,15 @@ def assemble_report(workdir, cfg):
         "You are a senior performance-marketing analyst.",
         "",
         "You have been given:",
-        "1. **E3_creative_angles.md** — the report template with six sections to fill.",
-        "2. **DATA_DIGEST.md** — a data export: every Meta ad with its copy and creative",
+        "1. **E3_creative_angles.md**, the report template with six sections to fill.",
+        "2. **DATA_DIGEST.md**, a data export: every Meta ad with its copy and creative",
         "   filenames; every Google ad with advertiser, format, run-duration (days),",
         "   OCR'd copy, and creative filenames; every LinkedIn ad with advertiser,",
         "   headline, body snippet, format, duration, real impression counts, and",
         "   creative filenames.",
-        "3. **creatives/** — the downloaded ad images/videos, named as in DATA_DIGEST.md.",
+        "3. **creatives/**, the downloaded ad images/videos, named as in DATA_DIGEST.md.",
         "",
-        "**Your task:** write the E3 report by filling the template's sections from the data.",
+        "**Your task:** write the creative angle report by filling the template's sections from the data.",
         "",
         "**Section-by-section guidance:**",
         "",
@@ -392,7 +596,7 @@ def assemble_report(workdir, cfg):
         "  fear/pain, aspiration, novelty, authority, etc.). Label A–H. Per angle: frequency",
         "  (% of ads), one verbatim example, which advertisers use it.",
         "- **Section 2 (Duration-weighted ranking):** use the Google duration column and",
-        "  LinkedIn impression counts (totalImpressionsMax where available).",
+        "  LinkedIn impression counts (where LinkedIn reports them).",
         "  Longer-running ads signal a tested, profitable angle. Rank angles by average",
         "  duration across ads using them. Note weak signals (long span, tiny creative count).",
         "- **Section 3 (Platform comparison):** Meta vs Google vs LinkedIn.",
@@ -414,6 +618,25 @@ def assemble_report(workdir, cfg):
         "Write in plain English. Be specific: quote copy verbatim, name advertisers,",
         "cite durations. Do not invent data not present in DATA_DIGEST.md.",
     ]
+    prompt_lines += _meta_coverage_prompt(meta_coverage)
+    if google_aside:
+        prompt_lines += [
+            "",
+            "**Google ads set aside (read this before writing anything about Google).**",
+            "Some Google ads found by searching a competitor's website were by advertisers",
+            "whose name does not match that competitor. They are not in the Google table and",
+            "are not that competitor's ads as far as this run can tell. Never attribute them",
+            "to a competitor, never list their advertisers as competitors or new advertisers,",
+            "and state their number only as DATA_DIGEST.md gives it.",
+        ]
+    if _not_confirmed:
+        prompt_lines += [
+            "The tool lists them under \"" + GOOGLE_NOT_CONFIRMED_HEADING[3:] + "\", the",
+            "last section of DATA_DIGEST.md and of E3_creative_angles.md. Keep that section",
+            "of E3_creative_angles.md word for word, as the last section of your report.",
+            "Never use those ads anywhere else in the report: not in an angle, a ranking, a",
+            "count, the platform comparison or the headline bank.",
+        ]
 
     (report_dir / "PROMPT.md").write_text("\n".join(prompt_lines) + "\n", encoding="utf-8")
 
@@ -421,7 +644,7 @@ def assemble_report(workdir, cfg):
     # 5. Summary line
     # ------------------------------------------------------------------
     print(
-        f"[E3] Report bundle assembled: {len(meta_items)} Meta ads, "
+        f"Report bundle assembled: {len(meta_items)} Meta ads, "
         f"{len(google_items)} Google ads, {len(li_items)} LinkedIn ads "
         f"→ {report_dir.resolve()}"
     )

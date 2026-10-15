@@ -59,13 +59,24 @@ def _token():
     return None
 
 
+# Said once per process when APIFY_TOKEN differs from the saved login.
+_KEPT_LOGIN_SAID = []
+
+
 def _persist_token_home(tok):
     """Best-effort save of the token to ~/.apify/auth.json -- the standard `apify
     login` location that _token() reads on later runs, so the token is entered at
     most once per environment. Non-destructive (keeps any other keys the CLI
     stored), idempotent (skips a rewrite when unchanged), mode 600. NEVER raises and
     NEVER logs the token: persistence is a convenience, never a reason to fail a run
-    or leak a credential."""
+    or leak a credential.
+
+    It never replaces a DIFFERENT saved token. Before, a run
+    with another account's token in APIFY_TOKEN overwrote the saved login, so later
+    runs and the user's own `apify` command line silently used the other account,
+    against the decided design ("without disturbing an existing `apify login`",
+    docs/SETUP.md). The saved login is kept, this run still uses `tok` (_token()
+    returns it), and one plain line on stderr says so, without either value."""
     try:
         path = os.path.expanduser("~/.apify/auth.json")
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -78,17 +89,49 @@ def _persist_token_home(tok):
                     data = existing
             except Exception:  # noqa: BLE001 — corrupt/unreadable: start clean
                 data = {}
-        if data.get("token") == tok:
+        saved = data.get("token")
+        # Stripped on both sides: a saved token with a
+        # trailing space is the same login, as config.persist_token already says.
+        if isinstance(saved, str) and saved.strip() == str(tok).strip():
             return  # already saved; don't rewrite
+        if isinstance(saved, str) and saved.strip():
+            if not _KEPT_LOGIN_SAID:
+                _KEPT_LOGIN_SAID.append(True)
+                print("A different Apify login is already saved here (~/.apify/auth.json), "
+                      "so it was kept; the token set in APIFY_TOKEN is used for this run "
+                      "only.", file=sys.stderr)
+            return
         data["token"] = tok
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+        _replace_auth_file(path, json.dumps(data, indent=2))
         try:
             os.chmod(path, 0o600)
         except OSError:
             pass  # best-effort on filesystems without POSIX modes
     except Exception:  # noqa: BLE001 — never break a run over persistence
         pass
+
+
+def _replace_auth_file(path, text):
+    """Write `text` to the auth file at `path` whole or not at all: into a temporary file in the same
+folder, then os.replace. Before,
+    the file was written in place, so a run killed mid-write left the user's own
+    Apify login file (which their `apify` command line uses too) half-written.
+    WHY realpath: when auth.json is a link (a dotfile manager), the file it points
+    to is replaced, as the in-place write did, never the link itself. The new file
+    is mode 600 from the start, as the old code made it right after writing."""
+    import tempfile
+    real = os.path.realpath(str(path))
+    fd, tmp = tempfile.mkstemp(prefix=".auth.", suffix=".tmp", dir=os.path.dirname(real))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, real)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def cli_available():
@@ -141,14 +184,21 @@ def run_info(run_id):
 def actual_charge_usd(run):
     """The USD a run actually BILLS the user — correct across pricing models.
 
-    `usageTotalUsd` is the platform RESOURCE cost (compute + proxy GB), which is
-    NOT the same as what the user is billed:
+    What `usageTotalUsd` holds was settled from real records (33 runs of 12 actors read back
+    from Apify): once a run's charges are final it
+    is the run's whole bill to the user, and it INCLUDES the event charges. On
+    all 30 runs of actors that absorb platform usage it equalled the priced
+    events exactly; on the 3 runs of actors that pass platform usage through it
+    was the priced events plus a small compute remainder ($0.000207, $0.000207,
+    $0.013846). So:
 
-      * PAY_PER_COMPUTE actors: the platform cost IS the bill -> usageTotalUsd.
-      * PAY_PER_EVENT, platform absorbed by developer: bill = event charges only;
-        usageTotalUsd is irrelevant (the developer eats it).
-      * PAY_PER_EVENT + `isPPEPlatformUsagePaidByUser`: bill = event charges PLUS
-        the platform usage passed through to the user.
+      * PAY_PER_COMPUTE actors: usageTotalUsd is the bill.
+      * PAY_PER_EVENT, platform absorbed by developer: bill = event charges.
+      * PAY_PER_EVENT + `isPPEPlatformUsagePaidByUser`: bill = usageTotalUsd
+        (events + compute). The old "events + usageTotalUsd" counted the events
+        twice: $0.1404 for a keyword-expander run Apify billed $0.0703. While
+        usageTotalUsd still lags the ledger it can read below the events, so the
+        figure is max(events, usageTotalUsd), never below the events.
 
     Some pay-per-event actors switched to the third mode ("high compute costs
     are now billed as Apify platform usage, passed through at cost; per-ad fee
@@ -176,18 +226,23 @@ def actual_charge_usd(run):
         # blinding the budget gate. Print a loud warning so a human notices; do
         # NOT invent a charge — warn + return the fallback so the uncertainty is visible.
         print(
-            f"[apify_client] WARNING: PAY_PER_EVENT run {run.get('id', '?')} — "
+            f"[apify_client] WARNING: PAY_PER_EVENT run {run.get('id', '?')}: "
             f"could not price event charges "
             f"(prices_populated={bool(prices)}, counts_populated={bool(counts)}). "
             f"Falling back to usageTotalUsd (${platform:.4f}), which is the "
-            f"developer-absorbed compute cost — NOT the event charges the user owes. "
+            f"developer-absorbed compute cost, NOT the event charges the user owes. "
             f"The budget figure for this run is UNRELIABLE and likely UNDER-REPORTS "
             f"the true bill. Verify the true cost on the Apify console.",
             file=sys.stderr,
         )
         return platform  # can't price the events -> fall back rather than under-bill
     events = sum(prices.get(k, 0.0) * n for k, n in counts.items())
-    return events + platform if pi.get("isPPEPlatformUsagePaidByUser") else events
+    if pi.get("isPPEPlatformUsagePaidByUser"):
+        # usageTotalUsd already includes the events (see above): adding them
+        # again double-counts. max() keeps a lagging usageTotalUsd from reading
+        # below the events it will include.
+        return max(events, platform)
+    return events
 
 
 def _charge_settled(run):
@@ -222,18 +277,199 @@ def _charge_settled(run):
         # Require a POSITIVE charged sum, not just a non-empty dict. Apify can
         # expose chargedEventCounts as {"<event>": 0} at terminal for a beat
         # before the ledger populates -- observed live on
-        # thewolves/appstore-reviews-scraper (run pDIrLLoaxzVr98SLj: 0 at return,
+        # thewolves/appstore-reviews-scraper (a real run: 0 at return,
         # 100 items / $0.01 a short time later). bool(counts) is True for that
         # zeros-dict, so the old check left the settle loop and actual_charge_usd
         # priced the run at $0.00 when it truly billed $0.01. A run that genuinely
         # charged nothing AND has no start fee sums to 0 and waits out
         # settle_max_s, then returns 0 -- the correct figure, just later.
-        # Start-fee actors always carry start>=1, so they still settle instantly.
+        # Start-fee actors carry start>=1 from the first read, so this check
+        # alone passes while the per-record charges are still missing: it
+        # is necessary, not sufficient. _charge_complete decides "final".
         total = sum(v for v in counts.values() if isinstance(v, (int, float)))
         return bool(prices) and total > 0
     if model:
         return float(run.get("usageTotalUsd") or 0.0) > 0.0
     return False
+
+
+# The environment variable naming the file where a run's entry script collects
+# the paid steps whose charges were still changing when the tool stopped waiting
+# (see _settle_charge). The entry script reads it to say, next to the bill, that
+# the bill may be incomplete. Unset (run_phase run by hand): the warning printed
+# below the step is the only notice.
+CHARGE_NOTES_ENV = "MARKETING_SCRAPING_CHARGE_NOTES"
+
+# Events that known actors charge once per record they write to their dataset.
+# A finished ledger holds at least as many of one of them as the dataset holds
+# records; fewer means Apify has not recorded them all yet. From the pricing of
+# the actors the three tools use: apify-default-dataset-item
+# is the platform's own per-record event; review-scraped (Google Maps reviews),
+# review (Trustpilot), result (Reddit: "when a post / comment is saved to the
+# dataset"), search-page-scraped (Google Search: one record per results page),
+# result-item (Google ads), ad (LinkedIn ads) and place-scraped (Google Maps place
+# discovery) are the actors' own.
+# An actor can price more than one of these (the Maps place-discovery actor also
+# prices review-scraped, an add-on the tool never asks for), so the check takes
+# the HIGHEST count among them: without place-scraped here, a real place-discovery run
+# (place-scraped 1, review-scraped 0, 1 record) read as never final and would have been flagged
+# as a possibly low bill.
+_ITEM_EVENTS = frozenset({
+    "apify-default-dataset-item", "review-scraped", "review", "result",
+    "search-page-scraped", "result-item", "ad", "place-scraped",
+})
+
+
+def _is_start_event(name):
+    """True for an event charged once when a run starts (apify-actor-start,
+    actor-start, start, Reddit's init), not per record."""
+    n = str(name).lower()
+    return "start" in n or n == "init"
+
+
+def _ledger(run):
+    """(prices, counts, events_usd) of a pay-per-event run."""
+    pi = run.get("pricingInfo") or {}
+    prices = {
+        k: float((v or {}).get("eventPriceUsd") or 0.0)
+        for k, v in ((pi.get("pricingPerEvent") or {}).get("actorChargeEvents") or {}).items()
+    }
+    counts = run.get("chargedEventCounts") or {}
+    events = sum(prices.get(k, 0.0) * n for k, n in counts.items()
+                 if isinstance(n, (int, float)))
+    return prices, counts, events
+
+
+def _charge_complete(prev, run, item_count):
+    """True once the run's charges have stopped changing, so actual_charge_usd
+    gives the run's FINAL bill.
+
+    WHY (seen in a paid validation run): Apify fills a finished run's ledger a few
+    seconds late, and not all at once. _charge_settled alone ("prices present and
+    counts > 0") accepted the first read that had anything in it, which was
+    often only the start fee: Capterra read $0.005 of $0.041 (start 1, records 0
+    of 40), Google Search read $0.006 of $0.0085 (pages 2 of 3), the keyword
+    expander $0.040 of $0.0703. The printed bill and the budget both used those
+    low figures. So the charge is final only when ALL of these hold:
+      - _charge_settled(run): prices present and something charged;
+      - the ledger and usageTotalUsd are unchanged since the previous read after
+        the run ended (prev): a ledger still filling changes between reads;
+      - when the run SUCCEEDED and the dataset's record count is known and
+        positive: a per-record event (_ITEM_EVENTS) has reached it, or, for an
+        actor with no known per-record event, something other than the start fee
+        is charged. Only for SUCCEEDED: a run Apify stopped at its spend cap
+        (ABORTED) keeps records it was never charged for, so its final ledger
+        is below its record count (a real Google ads run: 83 records, 54 charged, settled). The
+        rule used to apply to every status, which flagged every capped run as a possibly
+        low bill after waiting out the whole bound;
+      - for an actor that passes platform usage through, usageTotalUsd has caught
+        up with the event charges (it includes them once settled).
+    Other pricing models: usageTotalUsd is the bill; final once it is non-zero
+    and unchanged since the previous read.
+    """
+    if prev is None:
+        return False
+    if (prev.get("chargedEventCounts") or {}) != (run.get("chargedEventCounts") or {}):
+        return False
+    if float(prev.get("usageTotalUsd") or 0.0) != float(run.get("usageTotalUsd") or 0.0):
+        return False
+    if not _charge_settled(run):
+        return False
+    pi = run.get("pricingInfo") or {}
+    if pi.get("pricingModel") != "PAY_PER_EVENT":
+        return True
+    prices, counts, events = _ledger(run)
+    if item_count and run.get("status") == "SUCCEEDED":
+        per_record = [k for k in prices if k in _ITEM_EVENTS]
+        if per_record:
+            if max(counts.get(k) or 0 for k in per_record) < item_count:
+                return False
+        elif not any(n for k, n in counts.items() if not _is_start_event(k)):
+            return False
+    if pi.get("isPPEPlatformUsagePaidByUser"):
+        if float(run.get("usageTotalUsd") or 0.0) + 1e-9 < events:
+            return False
+    return True
+
+
+def _charge_zero_final(prev, run, item_count):
+    """True for a run that genuinely charged nothing: no records in its dataset,
+    nothing in its ledger, and the same on two reads. Only asked once the wait
+    has run out; such a run is not an incomplete bill (it is $0, just later)."""
+    if prev is None or item_count != 0:
+        return False
+    if (prev.get("chargedEventCounts") or {}) != (run.get("chargedEventCounts") or {}):
+        return False
+    counts = run.get("chargedEventCounts") or {}
+    charged = sum(n for n in counts.values() if isinstance(n, (int, float)))
+    return charged == 0 and float(run.get("usageTotalUsd") or 0.0) == 0.0
+
+
+def _dataset_item_count(dataset_id):
+    """The run dataset's record count (GET /datasets/{id} -> itemCount), or None
+    when it cannot be read. A free read; a failure only drops one check."""
+    if not dataset_id:
+        return None
+    try:
+        d = _req("GET", f"/datasets/{dataset_id}")
+    except Exception:  # noqa: BLE001 -- best-effort; the other checks still apply
+        return None
+    data = d.get("data") if isinstance(d, dict) else None
+    n = (data or {}).get("itemCount") if isinstance(data, dict) else None
+    if isinstance(n, bool) or not isinstance(n, (int, float)) or n < 0:
+        return None
+    return int(n)
+
+
+def _settle_charge(run_id, settle_poll_s, settle_max_s, actor=None):
+    """Re-read a finished run until its charges are final (_charge_complete),
+    for at most settle_max_s, and return the last read.
+
+    The bound stays: a slow ledger must never hang the product. When it runs
+    out first, the returned run carries "_charge_incomplete": True and the bill
+    SAYS so (_note_incomplete_charge) instead of passing a possibly low figure
+    off as final. A run that genuinely charged nothing (_charge_zero_final) is
+    not flagged.
+    """
+    deadline = time.time() + settle_max_s
+    prev = None
+    while True:
+        time.sleep(settle_poll_s)
+        run = _run_info_retry(run_id)
+        n = _dataset_item_count(run.get("defaultDatasetId"))
+        if _charge_complete(prev, run, n):
+            return run
+        if time.time() >= deadline:
+            break
+        prev = run
+    if _charge_zero_final(prev, run, n):
+        return run
+    run = dict(run)
+    run["_charge_incomplete"] = True
+    _note_incomplete_charge(run, actor, settle_max_s)
+    return run
+
+
+def _note_incomplete_charge(run, actor, waited_s):
+    """Say, next to the step and in the run's closing bill, that this step's
+    charge may be incomplete. Never raises: the notice must not stop a run."""
+    rid = run.get("id", "?")
+    try:
+        charge = actual_charge_usd(run)
+    except Exception:  # noqa: BLE001
+        charge = 0.0
+    print(f"   ⚠ Apify was still recording the charges of run {rid} after "
+          f"{waited_s}s. The ${charge:.4f} counted for this step may be lower than "
+          f"what Apify bills; the exact amount is on the Apify console.", flush=True)
+    path = os.environ.get(CHARGE_NOTES_ENV)
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"run": rid, "actor": actor or run.get("actId"),
+                                "charge_counted_usd": round(charge, 6)}) + "\n")
+    except Exception:  # noqa: BLE001
+        return
 
 
 _ACTOR_MIN_CACHE = {}
@@ -299,6 +535,17 @@ def run_actor(actor, actor_input, memory_mb=4096, timeout_s=1800, on_status=None
         ourselves the moment it breaches the ceiling. This stop is ours and does
         not depend on the actor being correctly implemented.
     """
+    # No actor run starts without a spending limit.
+    # Every actor run can charge (a start fee, or each record), and the limit
+    # below was sent only when max_charge_usd was above 0: a forecast of $0 (a
+    # count setting of 0) sent a paid call with no limit at all. A caller that
+    # has no positive, finite limit for a run must not start it.
+    _lim = max_charge_usd
+    if isinstance(_lim, bool) or not isinstance(_lim, (int, float)) \
+            or not (0 < float(_lim) < float("inf")):
+        raise ApifyCliError(
+            f"not starting {actor}: this paid run was given no spending limit "
+            f"({max_charge_usd!r}), so nothing was started and nothing was spent")
     aid = actor.replace("/", "~")
     if on_status:
         on_status("CALLING")
@@ -347,32 +594,51 @@ def run_actor(actor, actor_input, memory_mb=4096, timeout_s=1800, on_status=None
             last = run.get("status")
         time.sleep(poll_s)
         run = _run_info_retry(rid)
-    # Settle the billing ledger before returning. The event counts + per-event
-    # prices (and usageTotalUsd) are populated a beat AFTER terminal; reading
-    # them too early makes actual_charge_usd fall back and UNDER-charge the
-    # budget (see _charge_settled). Poll until the charge is priceable, bounded
-    # by settle_max_s so a genuinely zero-event or slow run still returns. This
-    # is a deterministic latency-bound wait, so a bound is correct here (unlike
-    # non-deterministic steps, which get no timeout).
-    settle_deadline = time.time() + settle_max_s
-    while True:
-        time.sleep(settle_poll_s)
-        run = _run_info_retry(rid)
-        if _charge_settled(run) or time.time() >= settle_deadline:
-            break
-    # COST NOTE: do NOT read `usageTotalUsd` as "the bill" — it is the platform
-    # RESOURCE cost, which only equals the bill for pay-per-compute actors. For
-    # pay-per-event actors the bill is the event charges (and, when the actor
-    # passes platform usage through — the platform cost on top). Use
-    # actual_charge_usd(run), which
-    # reads the run's own pricingInfo + chargedEventCounts. The USD `eventUsage`
-    # field settles minutes after SUCCEEDED, but chargedEventCounts is the live
-    # ledger and is reliable at terminal, so actual_charge_usd does not need to
-    # block for settlement.
+    # Settle the billing ledger before returning. Apify fills a finished run's
+    # ledger (chargedEventCounts, usageTotalUsd) a few seconds late and not all
+    # at once, so the first read after terminal can hold only the start fee.
+    # _settle_charge re-reads until the charges have stopped changing (see
+    # _charge_complete), bounded by settle_max_s so the product never hangs; a
+    # run that hits the bound is flagged and its bill says it may be
+    # incomplete. This is a deterministic latency-bound wait, so a bound is
+    # correct here (unlike non-deterministic steps, which get no timeout).
+    run = _settle_charge(rid, settle_poll_s, settle_max_s, actor)
+    # COST NOTE: price the run with actual_charge_usd(run), which reads the
+    # run's own pricingInfo + chargedEventCounts (and usageTotalUsd for actors
+    # that pass platform usage through); see its docstring for what
+    # usageTotalUsd holds.
     if on_status:
         on_status(run.get("status", "DONE"))
-    _warn_incomplete(run, actor, max_charge_usd, we_aborted)
+    # The run carries what the RUN INCOMPLETE block said, so the
+    # caller records the same judgment instead of making a second one.
+    _inc = _warn_incomplete(run, actor, max_charge_usd, we_aborted)
+    if _inc:
+        run["_incomplete"] = _inc
     return run
+
+
+def _incomplete_info(run, max_charge_usd, we_aborted):
+    """The one judgment of whether a finished run did NOT finish its work.
+
+    None for a run that SUCCEEDED (or whose status is unknown); otherwise a dict:
+    status, run_id, charged_usd, ceiling_usd and cap_stop (it stopped at the
+    spend cap, ours via L3 or Apify's maxTotalChargeUsd). _warn_incomplete prints
+    the RUN INCOMPLETE block from this dict and run_actor attaches it to the run
+    as run["_incomplete"]; the stage records and the scheduled run's
+    notification read that, never a second judgment (the notification
+    said "Run complete" under a printed RUN INCOMPLETE block)."""
+    status = run.get("status")
+    if status not in ("ABORTED", "FAILED", "TIMED-OUT", "TIMED_OUT"):
+        return None
+    try:
+        charge = actual_charge_usd(run)
+    except Exception:  # noqa: BLE001 — a pricing hiccup must never mask the warning
+        charge = 0.0
+    ceiling = float(max_charge_usd) if max_charge_usd else 0.0
+    cap_stop = bool(we_aborted or (ceiling > 0 and charge >= 0.9 * ceiling))
+    return {"status": status, "run_id": run.get("id", "?"),
+            "charged_usd": round(float(charge or 0.0), 6),
+            "ceiling_usd": round(ceiling, 6), "cap_stop": cap_stop}
 
 
 def _warn_incomplete(run, actor, max_charge_usd, we_aborted):
@@ -393,24 +659,19 @@ def _warn_incomplete(run, actor, max_charge_usd, we_aborted):
     differs: a cap stop needs the budget raised before resuming; an external
     abort just needs a resume. Prints to stderr so it never contaminates a
     stdout data stream, mirroring actual_charge_usd's warnings.
+
+    Returns the _incomplete_info dict it printed from, or None (nothing printed).
     """
-    status = run.get("status")
-    if status in (None, "SUCCEEDED"):
-        return
-    if status not in ("ABORTED", "FAILED", "TIMED-OUT", "TIMED_OUT"):
-        return
-    rid = run.get("id", "?")
-    try:
-        charge = actual_charge_usd(run)
-    except Exception:  # noqa: BLE001 — a pricing hiccup must never mask the warning
-        charge = 0.0
-    ceiling = float(max_charge_usd) if max_charge_usd else 0.0
-    cap_stop = we_aborted or (ceiling > 0 and charge >= 0.9 * ceiling)
+    info = _incomplete_info(run, max_charge_usd, we_aborted)
+    if info is None:
+        return None
+    status, rid = info["status"], info["run_id"]
+    charge, ceiling, cap_stop = info["charged_usd"], info["ceiling_usd"], info["cap_stop"]
     bar = "=" * 68
     out = [
         "",
         bar,
-        f"⚠  RUN INCOMPLETE — actor {actor} ended {status} (run {rid}).",
+        f"⚠  RUN INCOMPLETE: actor {actor} ended {status} (run {rid}).",
         "   It did NOT finish; whatever it returned is a PARTIAL result, and any",
         "   report built on it is partial. Do not treat this as complete.",
     ]
@@ -423,7 +684,7 @@ def _warn_incomplete(run, actor, max_charge_usd, we_aborted):
         out += [
             f"   It stopped for an external reason (~${charge:.2f}, under the "
             f"${ceiling:.2f} cap).",
-            "   Baseline recovery for an unexplained abort is to RESUME — not to",
+            "   Baseline recovery for an unexplained abort is to RESUME, not to",
             "   research or verify the failure first.",
         ]
     out += [
@@ -434,6 +695,7 @@ def _warn_incomplete(run, actor, max_charge_usd, we_aborted):
         "",
     ]
     print("\n".join(out), file=sys.stderr)
+    return info
 
 
 def _run_info_retry(run_id, tries=5, delay=3.0):
@@ -483,12 +745,7 @@ def reattach(run_id, on_status=None, poll_s=3, max_wait_s=1800,
         run = _run_info_retry(run_id)
     if run.get("status") != "SUCCEEDED":
         return None  # ended not-successfully after reattach -> re-launch
-    settle_deadline = time.time() + settle_max_s
-    while True:
-        time.sleep(settle_poll_s)
-        run = _run_info_retry(run_id)
-        if _charge_settled(run) or time.time() >= settle_deadline:
-            break
+    run = _settle_charge(run_id, settle_poll_s, settle_max_s)
     if on_status:
         on_status("RECOVERED")
     return run
@@ -599,20 +856,38 @@ if __name__ == "__main__":
     print(f"    Gap (under-report):                  ${BEFORE_AFTER_GAP:.4f}")
 
     print("\n=== TEST 3: PPE — isPPEPlatformUsagePaidByUser=True (platform pass-through) ===")
-    # B5 google-ads-scraper mode: event charges + platform usage both billed.
-    run_passthrough = {
-        "id": "test-run-passthrough",
-        "usageTotalUsd": 0.50,
-        "chargedEventCounts": {"page-scraped": 500},
-        "pricingInfo": {
-            **_PPE_PRICING,
-            "isPPEPlatformUsagePaidByUser": True,
-        },
+    # Real settled records read back from Apify. On a
+    # pass-through actor usageTotalUsd already INCLUDES the event charges, so the
+    # bill is usageTotalUsd, not events + usageTotalUsd (which counted the events
+    # twice: $0.1404 for a run Apify billed $0.0703).
+    _a1_pricing = {"pricingModel": "PAY_PER_EVENT", "isPPEPlatformUsagePaidByUser": True,
+                   "pricingPerEvent": {"actorChargeEvents": {
+                       "apify-actor-start": {"eventPriceUsd": 0.005},
+                       "apify-default-dataset-item": {"eventPriceUsd": 0.00167}}}}
+    run_passthrough = {  # crawlerbros keyword expander, a real run
+        "id": "expander_run_0001", "usageTotalUsd": 0.07030737501226365,
+        "chargedEventCounts": {"apify-actor-start": 4, "apify-default-dataset-item": 30},
+        "pricingInfo": _a1_pricing,
     }
-    result_passthrough = actual_charge_usd(run_passthrough)
-    # 500 × $0.010 = $5.00 events + $0.50 platform = $5.50
-    check_approx("PPE passthrough: events ($5.00) + platform ($0.50) = $5.50",
-                 result_passthrough, 5.50)
+    check_approx("pass-through (real A1 run): bill = usageTotalUsd $0.070307, not "
+                 "events $0.0701 + usage $0.0703", actual_charge_usd(run_passthrough),
+                 0.07030737501226365)
+    run_b5 = {  # lexis google-ads-scraper, a real run
+        "id": "ads_scraper_run_01", "usageTotalUsd": 0.051245527,
+        "chargedEventCounts": {"apify-actor-start": 4, "result-item": 30},
+        "pricingInfo": {"pricingModel": "PAY_PER_EVENT", "isPPEPlatformUsagePaidByUser": True,
+                        "pricingPerEvent": {"actorChargeEvents": {
+                            "apify-actor-start": {"eventPriceUsd": 5e-05},
+                            "result-item": {"eventPriceUsd": 0.00124}}}},
+    }
+    check_approx("pass-through (real B5 run): bill = usageTotalUsd $0.051246",
+                 actual_charge_usd(run_b5), 0.051245527)
+    # usageTotalUsd lagging below the events it will include (the real A1 run's
+    # settle-time read: usage $0.020207 while 30 records were already counted):
+    # never below the events.
+    check_approx("pass-through, usageTotalUsd still lagging: never below the events",
+                 actual_charge_usd({**run_passthrough, "usageTotalUsd": 0.02020739023938775}),
+                 0.0701)
 
     print("\n=== TEST 4: pay-per-compute actor — no PPE pricing block ===")
     run_compute = {
@@ -706,12 +981,20 @@ if __name__ == "__main__":
         check("L2: tiny forecast floored to maxTotalChargeUsd=0.0100",
               "maxTotalChargeUsd=0.0100" in (fake.start_path or ""), True)
 
-        # L2c: no cap passed -> query omits the param entirely.
-        fake = _FakeApify([_mk_run("SUCCEEDED", 1)])
-        globals()["_req"] = fake.req
-        run_actor("acme/act", {"x": 1})
-        check("L2: no cap -> query omits maxTotalChargeUsd",
-              "maxTotalChargeUsd" not in (fake.start_path or ""), True)
+        # L2c: no cap, a $0 cap, a negative, NaN or
+        # infinite cap -> nothing is started. Every actor run can charge, and a run
+        # started with no limit could bill without bound (google_max_items 0 sent
+        # one: a $0 forecast, so no maxTotalChargeUsd at all).
+        for _bad in (None, 0, 0.0, -0.05, float("nan"), float("inf"), True, "0.05"):
+            fake = _FakeApify([_mk_run("SUCCEEDED", 1)])
+            globals()["_req"] = fake.req
+            _refused = False
+            try:
+                run_actor("acme/act", {"x": 1}, max_charge_usd=_bad)
+            except ApifyCliError as _e:
+                _refused = "no spending limit" in str(_e)
+            check(f"L2: cap {_bad!r} -> refused, nothing started",
+                  (_refused, fake.start_path), (True, None))
 
         # L3a: live charge crosses the ceiling mid-run -> we abort ourselves.
         # RUNNING $0.02 -> RUNNING $0.06 (over $0.05) -> ABORTED (settled).
@@ -855,16 +1138,24 @@ if __name__ == "__main__":
                 json.dump({"token": "home_tok", "keep": "me"}, f)
             check("env APIFY_TOKEN beats the file", _token(), "env_wins")
 
-            # 8b: resolving from env AUTO-PERSISTED the env token to auth.json, and
-            # did NOT clobber the unrelated key -> non-destructive.
+            # 8b: a DIFFERENT saved login is kept, never
+            # replaced: the user's own `apify` command line and later runs keep
+            # their account. The env token is used for this run only (8a). This used to assert the
+            # replacement, which was a fault.
             _persisted = _read_auth() or {}
-            check("env resolution persisted the token to auth.json",
-                  _persisted.get("token"), "env_wins")
+            check("a different saved login is kept, not replaced",
+                  _persisted.get("token"), "home_tok")
             check("auto-persist kept unrelated keys (non-destructive)",
                   _persisted.get("keep"), "me")
 
-            # 8c: with env cleared, the persisted auth.json now answers -> proves a
-            # later run in the same environment does not re-ask.
+            # 8c: with no token saved, resolving from env AUTO-PERSISTS it; with
+            # env cleared, the persisted auth.json then answers -> proves a later
+            # run in the same environment does not re-ask.
+            with open(_auth, "w") as f:
+                json.dump({"keep": "me"}, f)
+            check("env APIFY_TOKEN used when no token is saved", _token(), "env_wins")
+            check("env resolution persisted the token to auth.json",
+                  (_read_auth() or {}).get("token"), "env_wins")
             _setenv("APIFY_TOKEN", None)
             check("auth.json answers after env is gone (no re-ask)", _token(), "env_wins")
 
@@ -1044,5 +1335,177 @@ if __name__ == "__main__":
         globals()["_req"] = _real_req3
         time.sleep = _real_sleep3
         _ACTOR_MIN_CACHE.clear()
+
+    # ==========================================================================
+    # TEST 12 — the charge is read only once it is FINAL.
+    # Recorded real ledger sequences from the paid validation. For each run the
+    # first read after it ended is what the tool printed then (the stage line
+    # and the usageTotalUsd its RUN_LOG recorded at that moment); the final read
+    # is the ledger read back from Apify afterwards:
+    #   Capterra: start fee only ($0.005) -> 40 records, $0.041
+    #   keyword expander (pass-through): 4 start fees, usage
+    #     $0.020207 (printed $0.040) -> 30 records, usage $0.070307
+    #   Google Search: 2 of 3 pages ($0.006) -> 3 pages, $0.0085
+    # The old rule (_charge_settled on the first read) stopped at the first
+    # read; the new one waits until the charges stop changing. Fully offline.
+    # ==========================================================================
+    print("\n=== TEST 12: recorded ledger sequences — bill read only once final ===")
+
+    def _pp(events, passthrough=None):
+        return {"pricingModel": "PAY_PER_EVENT", "isPPEPlatformUsagePaidByUser": passthrough,
+                "pricingPerEvent": {"actorChargeEvents": {
+                    k: {"eventPriceUsd": v} for k, v in events.items()}}}
+
+    _CP_PI = _pp({"apify-default-dataset-item": 0.0009, "apify-actor-start": 0.005})
+    _A1_PI = _pp({"apify-actor-start": 0.005, "apify-default-dataset-item": 0.00167}, True)
+    _B1_PI = _pp({"search-page-scraped": 0.0025, "actor-start": 0.001,
+                  "ai-overview-scraped": 0.002})
+
+    def _rd(rid, counts, usage, pi, status="SUCCEEDED"):
+        return {"id": rid, "status": status, "defaultDatasetId": "ds-" + rid,
+                "usageTotalUsd": usage, "chargedEventCounts": counts, "pricingInfo": pi}
+
+    # (label, first read after terminal, final read, dataset records, real bill)
+    _SEQS = [
+        ("Capterra",
+         _rd("capterra_run_0001", {"apify-actor-start": 1}, 0.005, _CP_PI),
+         _rd("capterra_run_0001", {"apify-default-dataset-item": 40,
+                                   "apify-actor-start": 1}, 0.041, _CP_PI),
+         40, 0.041),
+        ("keyword expander (A1)",
+         _rd("expander_run_0001", {"apify-actor-start": 4}, 0.02020739023938775, _A1_PI),
+         _rd("expander_run_0001", {"apify-actor-start": 4, "apify-default-dataset-item": 30},
+             0.07030737501226365, _A1_PI),
+         30, 0.07030737501226365),
+        ("Google Search (B1)",
+         _rd("serp_run_0001", {"search-page-scraped": 2, "actor-start": 1,
+                                   "ai-overview-scraped": 0}, 0.006, _B1_PI),
+         _rd("serp_run_0001", {"search-page-scraped": 3, "actor-start": 1,
+                                   "ai-overview-scraped": 0}, 0.0085, _B1_PI),
+         3, 0.0085),
+    ]
+
+    class _LagFake:
+        """POST -> RUNNING; GET /actor-runs -> the first (low) read for
+        `lag_reads` reads, then the final read; GET /datasets/{id} -> the
+        dataset's record count. Mirrors Apify filling the ledger late."""
+        def __init__(self, first, final, n_items, lag_reads=3):
+            self.first, self.final, self.n_items = first, final, n_items
+            self.lag_reads = lag_reads
+            self.run_gets = 0
+
+        def req(self, method, path, body=None, **kw):
+            if method == "GET" and path.startswith("/acts/"):
+                return {"data": {"pricingInfos": []}}
+            if method == "POST":
+                return {"data": {**self.first, "status": "RUNNING",
+                                 "chargedEventCounts": {}, "usageTotalUsd": 0.0}}
+            if path.startswith("/datasets/"):
+                return {"data": {"itemCount": self.n_items}}
+            self.run_gets += 1
+            return {"data": self.first if self.run_gets <= self.lag_reads else self.final}
+
+    def _old_formula(run):
+        """actual_charge_usd as it shipped before this fix (events PLUS
+        usageTotalUsd for a pass-through actor), so BEFORE is what was printed."""
+        pi = run.get("pricingInfo") or {}
+        prices, counts, events = _ledger(run)
+        usage = float(run.get("usageTotalUsd") or 0.0)
+        return events + usage if pi.get("isPPEPlatformUsagePaidByUser") else events
+
+    _real_req4 = _req
+    _real_sleep4 = time.sleep
+    time.sleep = lambda *a, **k: None
+    try:
+        for label, first, final, n_items, real in _SEQS:
+            old = _old_formula(first)
+            # The old rule accepted the first read: it is "settled" by
+            # _charge_settled, so the old loop stopped there and billed `old`.
+            check(f"{label}: first read passes the OLD rule (_charge_settled)",
+                  _charge_settled(first), True)
+            fake = _LagFake(first, final, n_items)
+            globals()["_req"] = fake.req
+            got = run_actor("rec/act", {"x": 1}, max_charge_usd=1.0)
+            new = actual_charge_usd(got)
+            print(f"    BEFORE (old rule): ${old:.6f}   AFTER (new rule): ${new:.6f}"
+                  f"   Apify charged: ${real:.6f}")
+            check(f"{label}: old rule's figure is LOW (${old:.4f} < ${real:.4f})",
+                  old < real - 1e-9, True)
+            check_approx(f"{label}: new rule bills the final charge", new, real)
+            check(f"{label}: final charge not flagged incomplete",
+                  got.get("_charge_incomplete"), None)
+            # reattach settles the same way.
+            fake = _LagFake(first, final, n_items)
+            globals()["_req"] = fake.req
+            check_approx(f"{label}: reattach also bills the final charge",
+                         actual_charge_usd(reattach("r")), real)
+
+        # 12b: the wait runs out while only the start fee is in -> the run is
+        # flagged, the step prints a notice, and the note reaches the file the
+        # entry script reads for the bill. The low figure is never silent.
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as _d:
+            _notes = os.path.join(_d, "notes.jsonl")
+            _old_env = os.environ.get(CHARGE_NOTES_ENV)
+            os.environ[CHARGE_NOTES_ENV] = _notes
+            first, final, n_items, real = _SEQS[0][1], _SEQS[0][2], 40, 0.041
+            fake = _LagFake(first, final, n_items, lag_reads=10 ** 9)  # never fills
+            globals()["_req"] = fake.req
+            _buf = io.StringIO()
+            _old_out = sys.stdout
+            sys.stdout = _buf
+            try:
+                got = run_actor("rec/act", {"x": 1}, settle_max_s=0.05,
+                                max_charge_usd=1.0)
+            finally:
+                sys.stdout = _old_out
+                if _old_env is None:
+                    os.environ.pop(CHARGE_NOTES_ENV, None)
+                else:
+                    os.environ[CHARGE_NOTES_ENV] = _old_env
+            check("bound hit before final: run flagged _charge_incomplete",
+                  got.get("_charge_incomplete"), True)
+            check("bound hit: the step prints that the charge may be low",
+                  "may be lower than what Apify bills" in _buf.getvalue(), True)
+            _lines = open(_notes, encoding="utf-8").read().splitlines() \
+                if os.path.exists(_notes) else []
+            check("bound hit: one note written for the bill",
+                  [json.loads(x).get("run") for x in _lines], ["capterra_run_0001"])
+
+        # 12c: a run that genuinely charged nothing (no records, empty ledger)
+        # is $0 once the wait runs out, and is NOT flagged incomplete.
+        _zero = _rd("zero", {"apify-default-dataset-item": 0}, 0.0,
+                    _pp({"apify-default-dataset-item": 0.0001}))
+        fake = _LagFake(_zero, _zero, 0)
+        globals()["_req"] = fake.req
+        got = run_actor("rec/act", {"x": 1}, settle_max_s=0.05,
+                                max_charge_usd=1.0)
+        check("genuine zero-charge run: not flagged incomplete",
+              got.get("_charge_incomplete"), None)
+
+        # 12d: the App Store lag bug (TEST 9) stays fixed through run_actor:
+        # {"item": 0} with 10 records in the dataset is never final.
+        _as_pi = _pp({"apify-default-dataset-item": 0.0001})
+        fake = _LagFake(_rd("as", {"apify-default-dataset-item": 0}, 0.0, _as_pi),
+                        _rd("as", {"apify-default-dataset-item": 10}, 0.001, _as_pi), 10)
+        globals()["_req"] = fake.req
+        check_approx("App Store zeros-dict then 10 records: bills $0.001",
+                     actual_charge_usd(run_actor("rec/act", {"x": 1}, max_charge_usd=1.0)), 0.001)
+
+        # 12e: pass-through usage lagging below the events is not final.
+        _lag = _rd("a1", {"apify-actor-start": 4, "apify-default-dataset-item": 30},
+                   0.0202, _A1_PI)
+        check("pass-through, usageTotalUsd below the events: NOT final",
+              _charge_complete(_lag, _lag, 30), False)
+        # 12f: unchanged but records not all charged: NOT final; one read: NOT final.
+        check("start fee only with 40 records: NOT final",
+              _charge_complete(_SEQS[0][1], _SEQS[0][1], 40), False)
+        check("a single read is never final (nothing to compare with)",
+              _charge_complete(None, _SEQS[0][2], 40), False)
+        check("final ledger read twice: final",
+              _charge_complete(_SEQS[0][2], _SEQS[0][2], 40), True)
+    finally:
+        globals()["_req"] = _real_req4
+        time.sleep = _real_sleep4
 
     print(f"\nResults: {PASS} passed, {FAIL} failed")

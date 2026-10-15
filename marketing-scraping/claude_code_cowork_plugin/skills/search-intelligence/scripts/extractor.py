@@ -76,7 +76,9 @@ def _extract(workdir, cfg):
     keywords_raw = _read_json(workdir / "keywords" / "keywords.json", [])
     keyword_universe = len(keywords_raw) if isinstance(keywords_raw, list) else 0
 
-    metrics_raw = _read_json(workdir / "metrics" / "keyword_metrics.json", None)
+    import postprocess as _PP0  # noqa: E402 (one judge for every reader of the cleaned file)
+    metrics_raw = _PP0.judge_keyword_rows(
+        _read_json(workdir / "metrics" / "keyword_metrics.json", None), workdir)
     metrics_list = metrics_raw if isinstance(metrics_raw, list) else []
 
     rankings_raw = _read_json(workdir / "serp" / "rankings.json", None)
@@ -102,12 +104,16 @@ def _extract(workdir, cfg):
     # ------------------------------------------------------------------
     # Coverage
     # ------------------------------------------------------------------
-    priced_keywords = len(metrics_list)
+    # A keyword Semrush gave no data for (postprocess.semrush_no_data, the one rule)
+    # is counted apart and is not "priced": its volume is unknown, not zero.
+    import postprocess as _PP  # noqa: E402
+    no_data_keywords = sum(1 for r in metrics_list if _PP.semrush_no_data(r))
+    priced_keywords = len(metrics_list) - no_data_keywords
     serp_keywords   = len(rankings_list)
 
     metrics_kw_set  = {
         r["keyword"] for r in metrics_list
-        if isinstance(r, dict) and "keyword" in r
+        if isinstance(r, dict) and "keyword" in r and not _PP.semrush_no_data(r)
     }
     rankings_kw_set = {
         r["keyword"] for r in rankings_list
@@ -124,9 +130,12 @@ def _extract(workdir, cfg):
         if not isinstance(r, dict):
             continue
         kw = r.get("keyword", "")
+        nd = _PP.semrush_no_data(r)
         keyword_table.append({
             "keyword":            kw,
-            "volume":             r.get("volume"),        # null preserved
+            # null preserved; a keyword with no data from Semrush has no volume, whatever
+            # the scraper's own 0 said
+            "volume":             None if nd else r.get("volume"),
             "keyword_difficulty": r.get("keyword_difficulty"),
             "cpc_usd":            r.get("cpc_usd"),
             "competition":        r.get("competition"),
@@ -136,6 +145,7 @@ def _extract(workdir, cfg):
             "referring_domains_median": r.get("referring_domains_median"),  # null preserved
             "source":             r.get("source", "semrush"),
             "has_serp":           kw in rankings_kw_set,
+            **({"no_data": True} if nd else {}),
         })
     keyword_table.sort(key=_volume_sort_key)
 
@@ -153,8 +163,9 @@ def _extract(workdir, cfg):
         if kd <= opp_kd_max:
             opportunities.append({
                 "keyword":            r.get("keyword", ""),
-                "volume":             r.get("volume"),
+                "volume":             None if _PP.semrush_no_data(r) else r.get("volume"),
                 "keyword_difficulty": kd,
+                **({"no_data": True} if _PP.semrush_no_data(r) else {}),
             })
     opportunities.sort(key=_volume_sort_key)
 
@@ -185,13 +196,20 @@ def _extract(workdir, cfg):
         f"Volume/difficulty/CPC available for {priced_keywords}/{keyword_universe} "
         f"keywords; the rest were expanded but not priced."
     )
+    if no_data_keywords:
+        nd_pl = "keyword" if no_data_keywords == 1 else "keywords"
+        caveats.append(
+            f"Semrush had no data for {no_data_keywords} {nd_pl}, so "
+            f"{'its volume is' if no_data_keywords == 1 else 'their volumes are'} unknown, "
+            f"not zero."
+        )
     caveats.append(f"SERP landscape covers {serp_keywords} {kw_pl}.")
 
     if priced_keywords <= 5 or serp_keywords <= 5:
         caveats.append(
             # House copy rule: no em-dash in our authored voice (caveats are
             # ours, not a verbatim quote). Use a plain hyphen.
-            "Small sample - treat rankings as directional, not exhaustive."
+            "Small sample: treat rankings as directional, not exhaustive."
         )
 
     # Date caveat: compose only the phrases whose date is non-null
@@ -210,6 +228,7 @@ def _extract(workdir, cfg):
         "coverage": {
             "keyword_universe": keyword_universe,
             "priced_keywords":  priced_keywords,
+            "no_data_keywords": no_data_keywords,
             "serp_keywords":    serp_keywords,
             "priced_and_serp":  priced_and_serp,
             # Pre-counted count of distinct SERP-owning domains, so the report's
@@ -246,6 +265,13 @@ def extract(workdir, cfg):
     """
     workdir = Path(workdir)
     facts   = _extract(workdir, cfg)
+    # A step that did not finish (failed, stopped by the budget cap, a
+    # scraper run that did not work) is named in the caveats, which the written report
+    # shows. Otherwise "SERP landscape covers 0 keywords" reads as "found nothing". Only
+    # when a step has such a record; the sentences are made once, in
+    # postprocess.unfinished_steps.
+    import postprocess as _PP  # noqa: E402
+    facts["caveats"] = facts["caveats"] + [u["sentence"] for u in _PP.unfinished_steps(workdir)]
     out     = workdir / "synthesis_facts.json"
     out.write_text(
         json.dumps(facts, ensure_ascii=False, indent=2),

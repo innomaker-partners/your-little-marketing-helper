@@ -61,7 +61,7 @@
   "_report_model_comment": "Model your local `claude` CLI uses to WRITE the E1/E2 reports. Leave blank for a capable default (sonnet). This step clusters the pre-counted findings and writes the analyst report, which is a judgment task, so do NOT set it to the cheapest model. Set a specific alias (e.g. 'opus') only if you want to override. The deterministic counting happens in code before this step, so the model never invents or counts. Note: report writing is not timed out. A capable model can take several minutes per report and that is normal, so the tool lets it finish rather than aborting on a clock.",
   "report_model": "",
 
-  "_budget_caps_comment": "Hard spend ceiling per phase (USD). The forecast-before-spend gate prints the estimate before every Apify run. A 5-competitor, 100-reviews-each run costs roughly $0.50 on Maps alone; raise this only if you are scraping a large category set.",
+  "_budget_caps_comment": "Hard spend ceiling per phase (USD). The forecast-before-spend gate prints the estimate before every Apify run. A 5-competitor, 100-reviews-each run is forecast at about $0.72 to $0.81 on Maps alone (the higher figure on Apify's free plan; paid Apify plans cost less); raise this only if you are scraping a large category set.",
   "budget_caps": {
     "phase1": 5.0
   },

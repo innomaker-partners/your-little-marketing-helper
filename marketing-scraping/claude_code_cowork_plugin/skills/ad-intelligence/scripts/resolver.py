@@ -26,6 +26,8 @@ These assumptions are marked [VERIFY] so you can confirm against a live run
 if the actor schema drifts.
 """
 
+from __future__ import annotations
+
 import json
 import sys
 from pathlib import Path
@@ -67,7 +69,7 @@ def _displayed_domain(displayed_url: str) -> str:
     """Extract a bare domain from a displayedUrl value.
 
     The apify/google-search-scraper actor returns displayedUrl in three forms:
-      - Clean URL:    'https://www.mrrooter.com'
+      - Clean URL:    'https://www.bestdrains.com'
       - Breadcrumb:   'https://www.trustpilot.com › ... › Plumber'
       - Junk:         '3,4K+ followers', '10+ comments  ·  8 months ago', ''
 
@@ -134,12 +136,12 @@ def load_b1_records(workdir: str | Path) -> list[dict]:
         if p.exists():
             try:
                 raw = json.loads(p.read_text(encoding="utf-8"))
-                print(f"resolver: loaded {len(raw)} B1 records from {p.name}")
+                print(f"resolver: loaded {len(raw)} Google search records from {p.name}")
                 return raw if isinstance(raw, list) else []
             except Exception as e:  # noqa: BLE001
-                print(f"resolver: WARNING — could not parse {p}: {e}")
+                print(f"resolver WARNING: could not parse {p}: {e}")
                 return []
-    print("resolver: WARNING — no B1 output found.")
+    print("resolver WARNING: no Google search output found.")
     return []
 
 
@@ -216,7 +218,8 @@ def resolve_from_serp(names: list[str], workdir: str | Path) -> list[dict]:
             results.append({
                 "name": name,
                 "domain": None,
-                "note": "no B1 record matched this query — verify the B1 run completed",
+                "note": "no Google search record matched this query: check that the "
+                        "Google search for competitors completed",
             })
             continue
 
@@ -261,10 +264,10 @@ def resolve_from_serp(names: list[str], workdir: str | Path) -> list[dict]:
                 skipped_str = ", ".join(skipped[:3])
                 note = (
                     f"all {len(organic)} organic results were directories "
-                    f"({skipped_str}, …) — verify manually"
+                    f"({skipped_str}, …): check by hand"
                 )
             else:
-                note = "no organic results in B1 output — verify manually"
+                note = "no organic results in the Google search output: check by hand"
 
         results.append({"name": name, "domain": chosen_domain, "note": note})
         if chosen_domain:

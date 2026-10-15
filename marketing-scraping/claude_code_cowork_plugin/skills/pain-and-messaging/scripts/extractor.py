@@ -17,18 +17,29 @@ why the self-tests need no files, no network, no Apify.
 """
 
 import json
+import math
 import re
 import sys
 from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# Static English stopword list (~145 words).
-# Covers function words that carry no pain/trust signal on their own.
-# Negation words ("not", "never", "no") are intentionally EXCLUDED from this
-# list -- they carry strong sentiment and appear in meaningful n-grams like
-# "never called back" or "no explanation given". Keeping them as content words
-# means bigrams/trigrams containing them are eligible for the pain list.
+# Static English stopword list.
+# Covers function words + high-frequency conversational fillers that carry no
+# pain/trust signal ON THEIR OWN. It is vertical-INDEPENDENT (the same list for
+# coffee, dentistry, plumbing, fitness) -- a standard NLP stopword list, not a
+# corpus-specific tuning of pain vocabulary.
+#
+# Negations and filler verbs ("not", "never", "said", "get", "find") are
+# INCLUDED as of the log-odds rework. They are removed only as standalone
+# UNIGRAMS: the n-gram eligibility rule (_is_eligible_phrase) keeps any bigram/
+# trigram that still contains a content word, so meaningful negation phrases
+# ("never showed", "not fixed", "no explanation") survive -- only the useless
+# standalone unigram "never" / "said" is dropped. This is why the earlier
+# comment kept them as content; that was over-cautious (the phrases are kept
+# regardless). Words that form a meaningful bigram with ANOTHER stopword
+# ("next day", "same day", "on time") are deliberately NOT added, so those
+# phrases stay eligible.
 # This list is a tuning knob: edit it for a non-English corpus.
 # ---------------------------------------------------------------------------
 _STOPWORDS: frozenset = frozenset({
@@ -65,6 +76,38 @@ _STOPWORDS: frozenset = frozenset({
     "truly", "absolutely", "definitely",
     "same", "new", "old", "one", "two", "three", "first", "last", "next",
     "every", "many", "much", "well", "way", "lot", "like",
+    # --- Additions: conversational fillers (unigram-noise, kept in phrases) ---
+    # Negations: useless alone, meaningful only with a content word (kept via
+    # the >=1-content-word n-gram rule). "no"/"day"/"time"/"order" excluded to
+    # protect "no one"/"next day"/"on time".
+    "no", "not", "never", "none", "nothing", "nobody",
+    "dont", "didnt", "doesnt", "wont", "cant", "cannot", "wouldnt", "couldnt",
+    "shouldnt", "isnt", "wasnt", "arent", "werent", "havent", "hasnt", "hadnt",
+    # Filler verbs (say/get/go/find/look/think class). Content-bearing pain
+    # verbs (charged, broke, cancelled, refused, waited, called) are NOT here.
+    "said", "say", "says", "saying", "told", "tell", "tells", "telling",
+    "get", "gets", "getting", "goes", "going", "went", "gone",
+    "comes", "coming", "came", "find", "finds", "finding", "found",
+    "want", "wants", "wanted", "need", "needs", "needed",
+    "know", "knows", "knew", "known", "think", "thinks", "thought",
+    "sees", "saw", "seen", "looks", "looked", "looking",
+    "makes", "making", "made", "takes", "taking", "took", "taken",
+    "gives", "giving", "gave", "given", "puts", "putting",
+    "asks", "asked", "asking", "uses", "using", "tried", "trying",
+    "keeps", "seem", "seems", "seemed", "getting",
+    # Generic nouns with no signal alone.
+    "thing", "things", "people", "person", "someone", "somebody", "something",
+    "anyone", "anything", "everyone", "everything", "guy", "guys", "stuff",
+    "company",
+    # Prepositions missing from the original list (kill bookend fragments like
+    # "before the"). All general function words, vertical-independent.
+    "before", "after", "during", "upon", "within", "against", "toward",
+    "towards", "beyond", "behind", "beside", "between", "among", "throughout",
+    "despite",
+    # Collapsed-contraction pronoun/aux forms (apostrophe is stripped in
+    # _tokenize, so "I'm"->"im", "that's"->"thats"). Function words, no signal.
+    "im", "ive", "id", "youre", "youve", "youd", "theyre", "theyve", "weve",
+    "wed", "hes", "shes", "thats", "whats", "theres", "heres", "lets",
 })
 
 # ---------------------------------------------------------------------------
@@ -256,55 +299,148 @@ def _count_corpus_phrases(reviews, ngram_range=(1, 3)):
 # Distinctiveness scoring
 # ---------------------------------------------------------------------------
 
+def _is_subspan(short_tokens, long_tokens):
+    """True if `short_tokens` occurs as a contiguous run inside `long_tokens`.
+    ("next day" is a sub-span of "the next day"; "customer" of "customer service".)"""
+    n = len(short_tokens)
+    if n == 0 or n >= len(long_tokens):
+        return False
+    return any(long_tokens[k:k + n] == short_tokens
+               for k in range(len(long_tokens) - n + 1))
+
+
+def _subsume_fragments(items, count_key, subsume_overlap=0.67):
+    """Drop n-gram fragments: a shorter phrase that is almost always PART OF a longer
+    phrase already on the list is the same finding twice. Keep the longer, complete
+    phrase and drop the shorter one.
+
+    Guard -- only merge when they are genuinely the same finding. Counts are per-review
+    (a phrase is counted once per review), and a sub-span appears in EVERY review its
+    container appears in, so count(short) >= count(long) always. The overlap that
+    matters is count(long) / count(short): the share of the shorter phrase's reviews
+    that also contain the longer one. Merge only when that is >= subsume_overlap
+    (default 2/3): at that point two-thirds-plus of the shorter phrase's uses are inside
+    the longer, so it is a fragment, not an independent signal. Below it the shorter word
+    is used substantially on its own (e.g. "appointment" 17 vs "an appointment" 9 ->
+    0.53, kept; "recommend" 61 vs "highly recommend" 36 -> 0.59, kept) and both survive.
+
+    Threshold derivation: 2/3 cleanly separates the real fragment pairs on the
+    calibration corpora ("the next day"/"next day" 0.83, "customer service"/"customer"
+    0.80, "highly recommend"/"highly" 0.88 -- all merged) from the independently-used
+    pairs above (0.53, 0.59 -- both kept). It is a share, so it is corpus-size
+    independent. The kept phrase keeps its OWN literal count, so every number shown
+    stays a true "reviews that mention exactly this phrase" figure.
+    """
+    tokenized = [(it, it["phrase"].split()) for it in items]
+    drop = set()
+    for short_it, short_tok in tokenized:
+        c_short = short_it.get(count_key, 0) or 0
+        if c_short <= 0:
+            continue
+        for long_it, long_tok in tokenized:
+            if long_it is short_it or len(long_tok) <= len(short_tok):
+                continue
+            if not _is_subspan(short_tok, long_tok):
+                continue
+            c_long = long_it.get(count_key, 0) or 0
+            if c_long / c_short >= subsume_overlap:
+                drop.add(short_it["phrase"])
+                break
+    return [it for it in items if it["phrase"] not in drop]
+
+
 def _score_phrases(low_counts, high_counts, n_low, n_high, band,
-                   min_phrase_count=2, eps=0.01, top_n=50):
-    """Rank phrases by how distinctive they are in `band` ('low' or 'high').
+                   min_phrase_count=2, top_n=50, alpha0=None, phrase_len_boost=0.12):
+    """Rank phrases by weighted log-odds-ratio with an informative Dirichlet
+    prior (Monroe, Colaresi & Quinn 2008, "Fightin' Words").
 
-    Distinctiveness, not raw frequency: a phrase that appears equally in both
-    bands (e.g. "service", "place") gets a score near 1.0 and is ranked below
-    phrases that are concentrated in one band.
+    Why this and not a rate ratio:
+      The previous score was  low_rate / (high_rate + eps)  with eps=0.01. For
+      ANY phrase absent from the opposite band (most conversational words), that
+      collapses to  low_rate * 100  -- i.e. pure frequency -- so the top of the
+      list became "most frequent low-star-only word" ("company", "dont", "said").
+      Log-odds fixes this at the root: a phrase w with per-review counts
+      y_primary / y_secondary is scored as a z-statistic
 
-    For band='low' (pain signals):
-        score = (low_rate) / (high_rate + eps)
-        where rate = review_count / max(1, n_reviews_in_corpus)
+          background p_w = (y_primary + y_secondary) / (N_primary + N_secondary)
+          prior      a_w = alpha0 * p_w                (informative Dirichlet)
+          log-odds   d_i = log( (y_i + a_w) / (N_i + alpha0 - y_i - a_w) )
+          delta      Z   = d_primary - d_secondary
+          variance   V   = 1/(y_primary + a_w) + 1/(y_secondary + a_w)
+          score      z   = Z / sqrt(V)
 
-    For band='high' (trust signals): symmetric inverse.
+      The informative prior shrinks corpus-COMMON phrases toward zero (they need
+      a large imbalance to score), and the variance term shrinks RARE phrases --
+      so neither high-frequency filler nor one-offs dominate. alpha0 defaults to
+      the vocabulary size (avg pseudocount ~1 per phrase type, spread by
+      background frequency); it is a tuning knob.
 
-    eps (default 0.01) prevents division-by-zero and caps the score for
-    phrases that appear zero times in the opposite band.
+    Multi-word preference: a small `phrase_len_boost` per extra
+    word nudges specific bigrams/trigrams above equally-distinctive single words
+    ("charged twice" over "charged"), WITHOUT overriding a strongly-distinctive
+    unigram -- the boost is multiplicative and small (default +12%/word). Applied
+    only to positive z (a boost must never rescue a non-distinctive phrase).
 
-    Ranking: score desc, count desc, phrase alpha (stable, reproducible).
-    Returns a list of dicts, capped at top_n.
+    Selection vs display order: distinctiveness SELECTS the
+    phrases (it is the only thing that keeps brand/topic words -- "acme", "drains",
+    "service" -- and filler off the list; verified: a pure-frequency list
+    is dominated by them). But the list is DISPLAYED and RETURNED ordered by
+    review count, because that is the number the viewer shows beside each phrase,
+    and a count-labelled list ordered by a hidden score reads as random / dishonest.
+    So: take the top_n by boosted z (the silent filter), then re-sort that set by
+    count desc. `score` (the z) is retained on each item for provenance, not order.
+    Returns a list of dicts, capped at top_n. Score shape unchanged (`score`,
+    `low_count`/`high_count`, `star_band`) so the viewer / report / emit are
+    untouched.
     """
     if band == "low":
         primary_counts, secondary_counts = low_counts, high_counts
-        n_primary, n_secondary = n_low, n_high
         primary_count_key, secondary_count_key = "low_count", "high_count"
         star_band = "low"
     else:
         primary_counts, secondary_counts = high_counts, low_counts
-        n_primary, n_secondary = n_high, n_low
         primary_count_key, secondary_count_key = "high_count", "low_count"
         star_band = "high"
+
+    # Token totals = summed per-review occurrence counts (not review counts).
+    N_p = sum(primary_counts.values()) or 1
+    N_s = sum(secondary_counts.values()) or 1
+    N_all = N_p + N_s
+    vocab = set(primary_counts) | set(secondary_counts)
+    a0 = float(alpha0) if alpha0 is not None else float(len(vocab) or 1)
 
     results = []
     for phrase, pcount in primary_counts.items():
         if pcount < min_phrase_count:
             continue
         scount = secondary_counts.get(phrase, 0)
-        p_rate = pcount / max(1, n_primary)
-        s_rate = scount / max(1, n_secondary)
-        score = p_rate / (s_rate + eps)
+        a_w = a0 * ((pcount + scount) / N_all)
+        den_p = max(N_p + a0 - pcount - a_w, 1e-9)
+        den_s = max(N_s + a0 - scount - a_w, 1e-9)
+        delta = math.log((pcount + a_w) / den_p) - math.log((scount + a_w) / den_s)
+        var = 1.0 / (pcount + a_w) + 1.0 / (scount + a_w)
+        z = delta / math.sqrt(var) if var > 0 else 0.0
+        if z > 0:
+            z *= 1.0 + phrase_len_boost * (len(phrase.split()) - 1)
         results.append({
             "phrase": phrase,
             primary_count_key: pcount,
             secondary_count_key: scount,
-            "score": round(score, 4),
+            "score": round(z, 4),
             "star_band": star_band,
         })
 
+    # SELECT the distinctive set by boosted z (count/phrase break z ties stably)...
     results.sort(key=lambda x: (-x["score"], -x[primary_count_key], x["phrase"]))
-    return results[:top_n]
+    selected = results[:top_n]
+    # ...drop n-gram fragments (keep the longer, complete phrase when a shorter one is
+    # almost always part of it), so the list shows one row per finding, not "customer"
+    # above "customer service"...
+    selected = _subsume_fragments(selected, primary_count_key)
+    # ...then DISPLAY that set by review count (the number shown), so the order matches
+    # the labels. Ties broken by z desc (the more distinctive first), then phrase.
+    selected.sort(key=lambda x: (-x[primary_count_key], -x["score"], x["phrase"]))
+    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +478,6 @@ def extract_from_reviews(reviews, cfg):
     min_phrase  = int(cfg.get("min_phrase_count",    2))
     quote_cap   = int(cfg.get("quote_cap",         400))
     ngram_range = (1, 3)
-    eps         = 0.01
 
     # Count records dropped during parsing so the report can disclose them.
     _drop_counts: dict = {"empty_text": 0, "no_stars": 0}
@@ -419,19 +554,19 @@ def extract_from_reviews(reviews, cfg):
     # (30/100/500) are a simple order-of-magnitude confidence gradient.
     if n_low == 0:
         meta_note = (
-            "0 low-star reviews in this corpus -- no pain signal available. "
+            "0 low-star reviews in this corpus, so no pain signal is available. "
             "Run with more competitors or lower low_star_threshold."
         )
         confidence_band = "none"
     elif n_low < 30:
         meta_note = (
-            f"Small low-star N ({n_low} of {n_total} total) -- "
+            f"Few low-star reviews ({n_low} of {n_total} total): "
             "directional signal only, not statistically representative."
         )
         confidence_band = "directional"
     elif n_low < 100:
         meta_note = (
-            f"Indicative sample ({n_low} of {n_total} total) -- "
+            f"Indicative sample ({n_low} of {n_total} total): "
             "more than directional but still not statistically robust."
         )
         confidence_band = "indicative"
@@ -464,11 +599,11 @@ def extract_from_reviews(reviews, cfg):
     # Distinctive phrase ranking
     pain_list  = _score_phrases(
         low_counts, high_counts, n_low, n_high, "low",
-        min_phrase_count=min_phrase, eps=eps, top_n=50,
+        min_phrase_count=min_phrase, top_n=50,
     )
     trust_list = _score_phrases(
         low_counts, high_counts, n_low, n_high, "high",
-        min_phrase_count=min_phrase, eps=eps, top_n=50,
+        min_phrase_count=min_phrase, top_n=50,
     )
 
     # Price mentions (the one retained static lexicon)
@@ -530,7 +665,7 @@ def extract_from_reviews(reviews, cfg):
     # Disclose non-English corpus when non-ASCII ratio exceeds threshold.
     if nonascii_ratio > 0.20:
         _lang_note = (
-            " Analysis vocabulary model is tuned for English -- "
+            " Analysis vocabulary model is tuned for English, so "
             "non-English phrase results are directional only."
         )
         meta_note = (meta_note.rstrip() + _lang_note) if meta_note else _lang_note.strip()
@@ -635,6 +770,17 @@ def extract_records(records, workdir, cfg):
     """
     workdir = Path(workdir)
     facts   = extract_from_reviews(records, cfg)
+
+    # A step that did not finish (failed, stopped by the budget cap, a scraper
+    # run that did not work) is named in the facts' note, which the written report shows
+    # next to the counts. Otherwise the counts read as "this source had none". Only when
+    # a step has such a record; the sentences are made once, in postprocess.unfinished_steps.
+    import postprocess as _PP  # noqa: E402
+    unfinished = _PP.unfinished_steps(workdir)
+    if unfinished:
+        add = " ".join(u["sentence"] for u in unfinished)
+        old = (facts["meta"].get("note") or "").rstrip()
+        facts["meta"]["note"] = (old + " " + add) if old else add
 
     out_path = workdir / "synthesis_facts.json"
     out_path.write_text(
@@ -809,8 +955,11 @@ if __name__ == "__main__":
             top = coffee_facts["pain_points_low_star"][0]
             check("coffee pain: top-1 phrase is 'cold' (highest score)",
                   top["phrase"], "cold")
-            check("coffee pain: top-1 score > 10 (highly distinctive, not generic)",
-                  top["score"] > 10, True)
+            # Score is now a log-odds z-statistic (was an eps-ratio ~25). z > 1.0
+            # means the phrase leans low-star by more than one standard error --
+            # a genuine distinctiveness signal, not a scale-specific magic number.
+            check("coffee pain: top-1 score > 1.0 (distinctive on the z-scale)",
+                  top["score"] > 1.0, True)
             check("coffee pain: top-1 low_count is int",
                   isinstance(top["low_count"], int), True)
             check("coffee pain: top-1 high_count is int",
@@ -836,8 +985,8 @@ if __name__ == "__main__":
         check("dentist pain: top-1 phrase is 'painful' (highest score)",
               dentist_facts["pain_points_low_star"][0]["phrase"] if dentist_facts["pain_points_low_star"] else None,
               "painful")
-        check("dentist pain: top-1 score > 10 (highly distinctive)",
-              dentist_facts["pain_points_low_star"][0]["score"] > 10 if dentist_facts["pain_points_low_star"] else False,
+        check("dentist pain: top-1 score > 1.0 (distinctive on the z-scale)",
+              dentist_facts["pain_points_low_star"][0]["score"] > 1.0 if dentist_facts["pain_points_low_star"] else False,
               True)
     except Exception as exc:
         FAIL += 1
@@ -915,8 +1064,8 @@ if __name__ == "__main__":
 
         check("distinctiveness: 'cold' score > 'coffee' score",
               cold_score > coffee_word_score, True)
-        check("distinctiveness: 'cold' score >> 10 (not generic)",
-              cold_score > 10, True)
+        check("distinctiveness: 'cold' score > 1.0 (distinctive on the z-scale)",
+              cold_score > 1.0, True)
 
         # The top-1 pain phrase must NOT be "coffee" (a both-band generic word)
         check("distinctiveness: top-1 pain phrase is not 'coffee'",
@@ -990,7 +1139,7 @@ if __name__ == "__main__":
     # =========================================================================
     # TEST 9 -- Contraction handling (regression: real Google reviews)
     #
-    # Found in the Phase-3 paid test on real Maps reviews: the tokenizer spaced
+    # Found in a paid test on real Maps reviews: the tokenizer spaced
     # the apostrophe, so "it's" -> "it" + "s" and "doesn't" -> "doesn" + "t",
     # and the junk fragments "s"/"t"/"it s" dominated the phrase lists. Synthetic
     # test corpora used clean text and never exercised contractions. This test
@@ -1451,6 +1600,90 @@ if __name__ == "__main__":
     except Exception as exc:
         FAIL += 12
         print(f"  FAIL  TEST 20 CRASHED: {exc}")
+        import traceback; traceback.print_exc()
+
+    # =========================================================================
+    # TEST 21: noisy corpus -- conversational fillers do NOT dominate pain
+    #
+    # THE ANTI-SELF-CALIBRATION GUARD. The coffee/dentist fixtures are
+    # CLEAN prose, so they never exercised the real-world failure: low-star
+    # reviews are longer and more narrative, so high-frequency fillers ("said",
+    # "got", "company", "dont", "find") appear more in the low band and, under
+    # the old eps-ratio, TOPPED the pain list ("PEOPLE SAID THIS MOST: dont").
+    # This test buries a genuine pain word ("leaked") in filler-heavy reviews and
+    # asserts (a) the fillers never appear as pain phrases, and (b) the genuine
+    # content word is the top-1 pain signal. This locks the log-odds + expanded-
+    # stopword behaviour against regression on realistic noisy text.
+    # =========================================================================
+    print("\n=== TEST 21: noisy corpus -- fillers do not dominate pain ===")
+    try:
+        NOISY = [
+            # Low-star: genuine pain "leaked" wrapped in conversational filler.
+            {"text": "The company said they would fix it but the pipe leaked again", "stars": 1, "business": "P"},
+            {"text": "I dont know what they did but it leaked and they said nothing", "stars": 2, "business": "P"},
+            {"text": "Got a plumber who said it was fine but it leaked everywhere",    "stars": 1, "business": "P"},
+            {"text": "They said they would come but the tap leaked for hours",         "stars": 2, "business": "P"},
+            {"text": "Found water everywhere the whole thing leaked and no one cared", "stars": 1, "business": "P"},
+            # High-star: same fillers, NO "leaked" -> fillers are both-band, "leaked" is low-only.
+            {"text": "The company said they would help and they were great",           "stars": 5, "business": "P"},
+            {"text": "I dont know how but they fixed everything perfectly",            "stars": 5, "business": "P"},
+            {"text": "Got a wonderful plumber who said hello and did a great job",     "stars": 4, "business": "P"},
+            {"text": "They said they would come and they were professional and kind",  "stars": 5, "business": "P"},
+            {"text": "Found the whole team helpful and they said thank you",           "stars": 4, "business": "P"},
+        ]
+        noisy_facts = extract_from_reviews(NOISY, {})
+        noisy_pain = [x["phrase"] for x in noisy_facts["pain_points_low_star"]]
+        FILLERS = {"said", "company", "dont", "got", "get", "find", "found",
+                   "know", "thing", "went", "they", "would"}
+        check("noisy: genuine pain word 'leaked' is in pain phrases",
+              "leaked" in noisy_pain, True)
+        check("noisy: top-1 pain phrase is 'leaked' (not a filler)",
+              noisy_facts["pain_points_low_star"][0]["phrase"] if noisy_pain else None,
+              "leaked")
+        check("noisy: NO conversational filler appears as a pain phrase",
+              sorted(set(noisy_pain) & FILLERS), [])
+    except Exception as exc:
+        FAIL += 3
+        print(f"  FAIL  TEST 21 CRASHED: {exc}")
+        import traceback; traceback.print_exc()
+
+    # =========================================================================
+    print("\n=== TEST 22: n-gram fragment subsumption (keep the longer phrase) ===")
+    try:
+        check("subspan: 'next day' inside 'the next day'",
+              _is_subspan(["next", "day"], ["the", "next", "day"]), True)
+        check("subspan: 'customer' inside 'customer service'",
+              _is_subspan(["customer"], ["customer", "service"]), True)
+        check("subspan: unrelated tokens are not a subspan",
+              _is_subspan(["late"], ["the", "next", "day"]), False)
+        check("subspan: equal length is not a subspan",
+              _is_subspan(["a", "b"], ["a", "b"]), False)
+        # A fragment mostly inside a longer phrase is dropped; the longer one is kept.
+        items = [{"phrase": "customer", "low_count": 10, "score": 2.0},
+                 {"phrase": "customer service", "low_count": 8, "score": 1.5}]
+        check("'customer' (0.80 overlap) dropped for 'customer service'",
+              {x["phrase"] for x in _subsume_fragments(items, "low_count")},
+              {"customer service"})
+        # Keep the LONGER phrase even when it is the one carrying a leading stopword.
+        items2 = [{"phrase": "next day", "low_count": 12, "score": 2.0},
+                  {"phrase": "the next day", "low_count": 10, "score": 1.9}]
+        check("keeps longer 'the next day', drops 'next day' (0.83 overlap)",
+              {x["phrase"] for x in _subsume_fragments(items2, "low_count")},
+              {"the next day"})
+        # Guard: a shorter phrase used independently enough is NOT merged (both kept).
+        items3 = [{"phrase": "appointment", "low_count": 17, "score": 2.0},
+                  {"phrase": "an appointment", "low_count": 9, "score": 1.4}]
+        check("independent 'appointment' (0.53 overlap) keeps BOTH",
+              {x["phrase"] for x in _subsume_fragments(items3, "low_count")},
+              {"appointment", "an appointment"})
+        items4 = [{"phrase": "recommend", "high_count": 61, "score": 2.0},
+                  {"phrase": "highly recommend", "high_count": 36, "score": 1.8}]
+        check("'recommend' (0.59 overlap) survives beside 'highly recommend'",
+              {x["phrase"] for x in _subsume_fragments(items4, "high_count")},
+              {"recommend", "highly recommend"})
+    except Exception as exc:
+        FAIL += 1
+        print(f"  FAIL  TEST 22 CRASHED: {exc}")
         import traceback; traceback.print_exc()
 
     # =========================================================================

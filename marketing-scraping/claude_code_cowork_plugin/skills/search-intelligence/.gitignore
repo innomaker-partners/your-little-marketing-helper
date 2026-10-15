@@ -1,4 +1,4 @@
-# Filled working config (holds no secrets, but is per-user) — commit the .example instead
+# Filled working config (holds no secrets, but is per-user): commit the .example instead
 SEARCH_CONFIG.json
 # Python cache
 __pycache__/

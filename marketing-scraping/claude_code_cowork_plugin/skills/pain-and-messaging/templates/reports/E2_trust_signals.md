@@ -4,7 +4,7 @@
 >
 > **Depth bar (analyst report, review-derived only):** rank trust signals into **Priority A (table stakes) / B (differentiators) / C (nice-to-have)**; run a **gap analysis** (what high-star customers praise vs what is absent from low-star reviews - a gap=opportunity matrix); give **quick-win trust builders** (week 1, free/near-free) and **medium-term builders** with a rough timeline. Close with the above-the-fold trust stack. This run has no listing or competitor-mechanics data; all rankings are review-derived.
 
-## Header block
+## About this analysis
 > Generated: {{DATE}} . Sources: high-star reviews from the sources in this run (N high-star of M total). When the corpus spans more than one source, disclose N per source here (from the `per_source` and `source_distribution` keys in the meta block), e.g. maps=N, trustpilot=N. _Review-derived only; findings are directional where low-star N is small, and any no-star source such as reddit has its split inferred from language rather than a rating._
 
 ## Executive summary

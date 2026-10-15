@@ -333,7 +333,7 @@ Each individual fix creates disproportionate differentiation, because customers 
 | Stars threshold (pain corpus) | 1-2 stars |
 | Stars threshold (trust corpus, E2) | 4-5 stars |
 | Corpus source | Google Maps reviews |
-| Approximate Apify cost | under $0.50 |
+| Apify cost forecast shown before the run | at most about $6.09 (6 businesses, up to 1,284 Google Maps reviews each); paid Apify plans cost less |
 | LLM for report assembly | user's own Haiku-tier model |
 | PII collected | none (personalData: false) |
 

@@ -37,8 +37,8 @@ def _guard_raw_is_list(raw, adapter_label):
     """
     if not isinstance(raw, list):
         print(f"   WARNING [{adapter_label}]: actor returned a non-list payload "
-              f"({type(raw).__name__!r}); likely an error object — "
-              f"skipping to avoid a silent empty corpus")
+              f"({type(raw).__name__!r}); likely an error object, "
+              f"skipped so it is not read as an empty corpus")
         return True
     return False
 
@@ -88,6 +88,217 @@ def _redact_pii(records, source):
     return out
 
 
+def _drop_stale_outputs(base, rel_paths, label, what):
+    """Remove the derived files a step writes, and say so, when the step's latest
+    result gave nothing to write them from. The same helper as in the search tool's
+    postprocess.py (written there first for the keyword volumes, then generalised and used for
+    every step that writes a file of its own from its
+    raw result, in all three tools).
+
+    base: the folder the paths are under (here, the step's folder).
+    rel_paths: this step's own derived files, relative to base. Never the step's raw
+        result, run_02_full.json or run_01_test.json: that is the step's result as it
+        stands, and it is not touched.
+    label: the step's function name, for the console line. what: the plain name of
+        what was removed.
+
+    WHY: each of those files is written from the step's raw result and from nothing
+    else. When the step is run again in the same folder (--force) and returns
+    nothing or an error, the step has nothing to write, and an earlier run's files
+    would stay in place, looking like this run's: the app and the report would show
+    last time's Reddit set-aside items as this time's, and a later repeat would take
+    last time's raw reviews as the held reviews of this folder. Removing them keeps
+    one rule true: a derived file is there only when it was written from the step's
+    result as it stands in this folder. A step that is not run again keeps its files
+    (this is called only by the step itself, after a run)."""
+    removed = False
+    for rel in rel_paths:
+        p = Path(base) / rel
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            continue  # nothing left over: the usual case
+        except OSError as exc:
+            print(f"{label}: WARNING: could not remove the {what} an earlier run "
+                  f"left in this folder ({exc}); they may be old")
+            continue
+        removed = True
+    if removed:
+        print(f"{label}: removed the {what} an earlier run left in this folder, "
+              "so they cannot be mistaken for this run's")
+
+
+# The audit copy every review step saves of its raw result (reviewer identity values
+# removed), and the Reddit set-aside file. Both are written by the step's own
+# postprocess function from its raw result, so both go when it has none.
+_RAW_COPY = "run_02_full.raw.json"
+_REDDIT_SET_ASIDE = "reddit_neutral.json"
+
+
+# --- the steps of a run that did not finish ----------------------
+# The same block, word for word, in the postprocess.py of all three tools (a test
+# pins that): it reads the records run_phase already wrote and nothing else.
+
+_ENDED_HOW = {"ABORTED": "was stopped", "FAILED": "failed",
+              "TIMED-OUT": "ran out of time", "TIMED_OUT": "ran out of time"}
+
+
+def _record_of(path):
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def only_error_items(items):
+    """A sentence for a step whose dataset is nothing but error items, else None.
+    Apify reports a failed request as an item {"#error": true,
+    "#debug": {"errorMessage": ...}} inside the dataset; a good item carries
+    "#error": false (recorded search results do). Such a dataset is a failed step, never
+    an empty answer. A dataset with some good items among the error items is not this
+    (it is treated as the results it holds)."""
+    if not isinstance(items, list) or not items:
+        return None
+    if not all(isinstance(i, dict) and i.get("#error") is True for i in items):
+        return None
+    dbg = items[0].get("#debug")
+    why = dbg.get("errorMessage") if isinstance(dbg, dict) else None
+    why = f" ({str(why).strip()[:150]})" if why and str(why).strip() else ""
+    return f"the scraper returned only an error and no results{why}"
+
+
+def unfinished_steps(workdir):
+    """The steps of this run that did not finish, each as one plain sentence:
+    [{"step": <name>, "sentence": <text>}] in step order, [] when every step that ran
+    finished.
+
+    WHY: a step that failed, was stopped by the budget cap, or whose scraper run did
+    not finish left no results, and everything downstream (the index, the written
+    report's facts, the app, the month comparison) then read that as "found nothing".
+    run_phase already records each such step next to its output
+    (.run_incomplete.json, .run_notice.json); the closing lines of the entry script
+    name them. This reads the same records once, so that every other place repeats one
+    sentence and none of them works it out again. An honest empty result (the step ran
+    and found nothing) has no record and is not listed; a step the settings leave out
+    is not listed either (the closing lines say that).
+
+    The sentence for a failed or budget-stopped step also says that any results shown
+    for it are an earlier run's, when the folder still holds a finished result file for
+    it: the failed step wrote none of its own. A step whose record says it saved its
+    result before it stopped (result_saved) is the exception: the result in
+    the folder is this run's, and the sentence says it may be incomplete.
+
+    A step a later run skipped carries the record kind
+    "kept_after_failed_attempt" (run_phase._note_kept_after_failed_attempt). It is not
+    an unfinished step: its finished result is in the folder, and the sentence says
+    the latest attempt to fetch it again failed. It is listed under "kept_step", not
+    "step": the month comparison takes "step" to mean records may be missing."""
+    import stages as _stages
+    out = []
+    for key, spec in _stages.STAGES.items():
+        d = Path(workdir) / spec["folder"]
+        name = spec.get("name") or key
+        inc = _record_of(d / ".run_incomplete.json") or {}
+        by_kind = {}
+        for e in inc.get("entries") or []:
+            if isinstance(e, dict):
+                by_kind.setdefault(e.get("kind"), e)
+        earlier = (" Any results shown for this step are from an earlier run."
+                   if (d / "run_02_full.json").exists() else "")
+        missing = " That is not the same as finding nothing."
+        k = by_kind.get("kept_after_failed_attempt")
+        if k:
+            if k.get("result_saved"):
+                s = (f"{name}: the latest attempt to fetch it again saved its results and "
+                     f"then stopped with an error, so what is shown for it comes from that "
+                     f"attempt and may be incomplete.")
+            else:
+                why = ("stopped with an error" if k.get("was") != "budget_stop" else
+                       "started, but the run reached the budget cap in your settings "
+                       "part-way through it and nothing it collected was kept"
+                       if k.get("part_way") else
+                       "did not run, because the run reached the budget cap in your settings")
+                s = (f"{name}: the latest attempt to fetch it again {why}, so the results "
+                     f"shown for it were kept from an earlier fetch.")
+            out.append({"kept_step": name, "sentence": s})
+            continue
+        if (by_kind.get("step_failed") or {}).get("result_saved"):
+            s = (f"{name} stopped with an error after it had saved this run's results, "
+                 f"so what is shown for it comes from this run but may be incomplete.")
+        elif "step_failed" in by_kind:
+            s = (f"{name} stopped with an error before it finished, so its results "
+                 f"are missing from this run.{missing}{earlier}")
+        elif "budget_stop" in by_kind:
+            if by_kind["budget_stop"].get("part_way"):
+                s = (f"{name} started, but the run reached the budget cap in your "
+                     f"settings part-way through it, and nothing it collected was "
+                     f"kept, so its results are missing from this run.{missing}{earlier}")
+            else:
+                s = (f"{name} did not run, because the run reached the budget cap in "
+                     f"your settings, so its results are missing from this "
+                     f"run.{missing}{earlier}")
+        elif "run_ended" in by_kind:
+            e = by_kind["run_ended"]
+            how = _ENDED_HOW.get(str(e.get("status")), "did not finish")
+            s = (f"{name}: the scraper run {how} before it finished, so what it "
+                 f"collected is partial.{missing}" if e.get("records")
+                 else f"{name}: the scraper run {how} before it finished and "
+                      f"collected nothing, so its results are missing from this "
+                      f"run.{missing}")
+        elif _record_of(d / ".run_notice.json"):
+            s = (f"{name}: the scraper reported that it did not work, so its "
+                 f"results are missing from this run.{missing}")
+        else:
+            continue
+        out.append({"step": name, "sentence": s})
+    return out
+
+
+def drop_stage_outputs(stage, stage_dir, workdir):  # noqa: ARG001 (same signature in all three tools)
+    """Remove the files an earlier run's step left behind, for a step that ended
+    without a result in this run (run_phase calls it where a step is not
+    run, fails, or is stopped, and only when this run would have run it again). The
+    step's raw run files are its result as it stands and are never touched.
+
+    Each review step writes one file of its own, the saved copy of its reviews (and,
+    for Reddit, the set-aside posts); a later repeat takes the saved copy as the held
+    reviews of the folder. The place list of the Google Maps places step is not
+    removed: in the named-competitor modes it is written outside that step.
+
+    The saved copy is the pair of the step's run_02_full.json, and
+    the next repeat merges new reviews into it as the held reviews. It is never removed
+    while its run_02_full.json stays: without it the repeat read every earlier review
+    as gone (and, for Trustpilot, said the reviews "could not be matched"). When the
+    step got a new result of nothing, _drop_stale_outputs in the step's own function
+    removes the pair with it; here the result is not touched, so the pair stays.
+
+    Only that pair stays. The Reddit set-aside file is read by the
+    report and the app, never by the merge (Reddit is not in run_phase._D2_INCREMENTAL,
+    and the merge reads only the step's run_02_full.json or its saved copy), so it goes
+    as before: left in place, the topics report was written again from last run's
+    posts as if they were this run's."""
+    has_result = (Path(stage_dir) / "run_02_full.json").exists()
+    if stage in ("TP", "AS", "GP", "G2", "CP"):
+        if not has_result:
+            _drop_stale_outputs(stage_dir, [_RAW_COPY], "review step", "saved copy of the reviews")
+    elif stage == "RD":
+        if has_result:
+            _drop_stale_outputs(stage_dir, [_REDDIT_SET_ASIDE], "Reddit step",
+                                "set-aside posts")
+        else:
+            _drop_stale_outputs(stage_dir, [_RAW_COPY, _REDDIT_SET_ASIDE], "Reddit step",
+                                "saved copy of the posts and the set-aside posts")
+
+
+def rebuild_dropped_outputs(stage, stage_dir, workdir, cfg):  # noqa: ARG001 (same signature in all three tools)
+    """Nothing to build again in this tool. run_phase calls this for a
+    step it skips as complete; here no file the merge needs is taken out of a step whose
+    result stays (drop_stage_outputs keeps the saved copy). The Reddit set-aside file is
+    taken out and not built again: building it would mean sorting the posts
+    again. It is here so that run_phase._run_one is the same text in all three tools."""
+
+
 def postprocess(stage, stage_dir, workdir, cfg):
     if stage == "B2a":
         _pp_b2a(stage_dir, cfg)
@@ -128,7 +339,7 @@ def _pp_b2a(stage_dir, cfg):
     """
     # MODE 2: subjects.py owns the bridge; return early without touching the file.
     if cfg.get("competitor_names"):
-        print("   _pp_b2a: mode 2 (named competitors) — "
+        print("   _pp_b2a: mode 2 (named competitors): "
               "subjects.select_mode2_targets() handles review_targets.json (skipping)")
         return
 
@@ -148,7 +359,7 @@ def _pp_b2a(stage_dir, cfg):
         json.dumps(targets, ensure_ascii=False, indent=2), encoding="utf-8")
     (Path(stage_dir) / "businesses_ranked.json").write_text(
         json.dumps(biz, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"   → {len(biz)} businesses; top {len(targets)} queued for review extraction (B2b)")
+    print(f"   → {len(biz)} businesses; top {len(targets)} queued for Google Maps reviews")
 
 
 # --- TP -> normalized corpus (Trustpilot) ------------------------------------
@@ -187,10 +398,12 @@ def _pp_trustpilot(stage_dir, cfg):
     stage_dir = Path(stage_dir)
     raw = _latest_run(stage_dir)
     if _guard_raw_is_list(raw, "_pp_trustpilot"):
+        _drop_stale_outputs(stage_dir, [_RAW_COPY], "_pp_trustpilot", "saved copy of the reviews")
         return
     if not raw:
-        print("   _pp_trustpilot: no records found — skipping "
-              "(stage may not have run yet)")
+        print("   _pp_trustpilot: no records found, skipping "
+              "(the step may not have run yet)")
+        _drop_stale_outputs(stage_dir, [_RAW_COPY], "_pp_trustpilot", "saved copy of the reviews")
         return
 
     # Save raw as audit trail before overwriting (identity values redacted).
@@ -272,6 +485,26 @@ _REDDIT_MDLINK = re.compile(r"\[([^\]]+)\]\((?:https?://[^)]+)\)")
 _REDDIT_SUBURL = re.compile(r"/r/([A-Za-z0-9_]+)")
 
 
+def _resolved_app_names(stage_dir):
+    """{id: app_name} from the stage's resolution.json, written at run start by
+    the free lookup in subjects.py (a list of {input, kind, id, app_name, ...}).
+    Missing, unreadable or oddly shaped file -> {} (the caller falls back to the
+    id): older run folders have no such file, and a crash here would lose a paid
+    run's output."""
+    try:
+        entries = json.loads((Path(stage_dir) / "resolution.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    names = {}
+    for e in entries if isinstance(entries, list) else []:
+        if not isinstance(e, dict):
+            continue
+        i, n = str(e.get("id") or "").strip(), e.get("app_name")
+        if i and isinstance(n, str) and n.strip() and i not in names:
+            names[i] = n.strip()
+    return names
+
+
 def _pp_app_reviews(stage_dir, cfg, source):
     """Normalize raw thewolves/appstore-reviews-scraper or
     thewolves/google-play-reviews-scraper records into the canonical shape
@@ -285,10 +518,12 @@ def _pp_app_reviews(stage_dir, cfg, source):
                      string, else text alone.  App Store titles are punchy;
                      Google Play titles are usually null so the fold no-ops.
       stars       <- score  (int 1-5)
-      businessName<- app_labels[appId] if configured, else appId (raw numeric/
-                     package).  FROZEN: app-review records have no app-name
-                     field, only appId (numeric "324684580" for App Store);
-                     without a label map the report would show the raw id.
+      businessName<- app_labels[appId] if configured (an explicit user choice
+                     wins), else the app_name the free lookup saved for that id
+                     in this stage's resolution.json (subjects.py), else appId
+                     (raw numeric/package).  FROZEN: app-review records have no
+                     app-name field, only appId (numeric "324684580" for App
+                     Store); without a name the app shows the raw id.
                      Using businessName (not title) keeps _parse_reviews from
                      reading the review headline as the business name.
       source      <- source arg ("appstore" or "googleplay")
@@ -303,10 +538,14 @@ def _pp_app_reviews(stage_dir, cfg, source):
     stage_dir = Path(stage_dir)
     raw = _latest_run(stage_dir)
     if _guard_raw_is_list(raw, f"_pp_app_reviews [{source}]"):
+        _drop_stale_outputs(stage_dir, [_RAW_COPY], f"_pp_app_reviews [{source}]",
+                            "saved copy of the reviews")
         return
     if not raw:
-        print(f"   _pp_app_reviews [{source}]: no records found -- skipping "
-              "(stage may not have run yet)")
+        print(f"   _pp_app_reviews [{source}]: no records found, skipping "
+              "(the step may not have run yet)")
+        _drop_stale_outputs(stage_dir, [_RAW_COPY], f"_pp_app_reviews [{source}]",
+                            "saved copy of the reviews")
         return
 
     # Save raw as audit trail before overwriting (identity values redacted).
@@ -316,6 +555,7 @@ def _pp_app_reviews(stage_dir, cfg, source):
         encoding="utf-8")
 
     app_labels = cfg.get("app_labels", {}) or {}
+    resolved   = _resolved_app_names(stage_dir)
     pii_count  = 0
     skipped    = 0
 
@@ -334,7 +574,7 @@ def _pp_app_reviews(stage_dir, cfg, source):
                 stars = None
 
             app_id        = str(rec.get("appId") or "").strip()
-            business_name = app_labels.get(app_id, app_id)
+            business_name = app_labels.get(app_id) or resolved.get(app_id) or app_id
 
             # Count PII fields present in this raw record.
             pii_count += sum(1 for f in _APP_PII_FIELDS if f in rec)
@@ -421,9 +661,13 @@ def _pp_reddit(stage_dir, cfg):
     stage_dir = Path(stage_dir)
     raw = _latest_run(stage_dir)
     if _guard_raw_is_list(raw, "_pp_reddit"):
+        _drop_stale_outputs(stage_dir, [_RAW_COPY, _REDDIT_SET_ASIDE], "_pp_reddit",
+                            "saved copy of the posts and the set-aside posts")
         return
     if not raw:
-        print("   _pp_reddit: no records found -- skipping (stage may not have run yet)")
+        print("   _pp_reddit: no records found, skipping (the step may not have run yet)")
+        _drop_stale_outputs(stage_dir, [_RAW_COPY, _REDDIT_SET_ASIDE], "_pp_reddit",
+                            "saved copy of the posts and the set-aside posts")
         return
 
     raw_path = stage_dir / "run_02_full.raw.json"
@@ -547,10 +791,14 @@ def _pp_g2capterra(stage_dir, cfg, source):
     stage_dir = Path(stage_dir)
     raw = _latest_run(stage_dir)
     if _guard_raw_is_list(raw, f"_pp_g2capterra [{source}]"):
+        _drop_stale_outputs(stage_dir, [_RAW_COPY], f"_pp_g2capterra [{source}]",
+                            "saved copy of the reviews")
         return
     if not raw:
-        print(f"   _pp_g2capterra [{source}]: no records found -- skipping "
-              "(stage may not have run yet)")
+        print(f"   _pp_g2capterra [{source}]: no records found, skipping "
+              "(the step may not have run yet)")
+        _drop_stale_outputs(stage_dir, [_RAW_COPY], f"_pp_g2capterra [{source}]",
+                            "saved copy of the reviews")
         return
 
     # Save raw as audit trail before overwriting (identity values redacted).

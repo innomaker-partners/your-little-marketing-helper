@@ -8,13 +8,25 @@ own Claude Code CLI. No vendor lock-in, no subscription.
 > ## This tool costs real money to run. Read this first.
 >
 > Unlike a one-off scrape, this tool meters **per keyword** on your own Apify
-> account. A focused run of roughly 300 keywords costs about **$2 to $5** in
-> Apify credits, and larger runs (1,000+ keywords) cost more. That **exceeds
-> Apify's free monthly credit, so you need a card on your Apify account.**
+> account. A focused run of roughly 300 keywords is forecast at about **$3 to $7**
+> in Apify credits: about $7 on Apify's free plan, and less on a paid Apify plan,
+> which charges less per keyword. Larger runs (1,000+ keywords) cost more. That
+> **exceeds Apify's free monthly credit, so you need a card on your Apify account.**
 >
-> It is cheap next to a $99 to $139 per month keyword-tool subscription, and it
-> shows you the exact forecast before it spends anything (always run `--dry-run`
+> It shows you the exact forecast before it spends anything (always run `--dry-run`
 > first). But it is not free, and this guide will not pretend it is.
+>
+> **A second request is not in that forecast.** A keyword that comes back with no
+> data from Semrush is asked for once more, usually at about $0.02 each. It is
+> counted inside your budget cap and in the total billed, but not in the forecast
+> figure. If your budget cap is short for it by up to $0.25, nothing is spent and
+> you are asked first. In a scheduled month nobody is there to ask, and the second
+> request is still made when it fits inside the lower of your budget cap and the
+> ceiling you approved. Only the case
+> short by up to $0.25 waits: nothing is spent on it, and those keywords stay "no data
+> from Semrush" until you next talk to Claude about that research and agree to the
+> small extra cost. If it is short by more, only the keywords that fit inside the cap
+> are asked for.
 
 ---
 
@@ -33,7 +45,8 @@ own Claude Code CLI. No vendor lock-in, no subscription.
    - **Save an exported token once:** with `APIFY_TOKEN` set in your shell, run
      `python3 ${CLAUDE_PLUGIN_ROOT}/skills/search-intelligence/scripts/config.py --persist-token`.
      It stores the token in `~/.apify/auth.json` so later runs reuse it, and
-     prints only a masked confirmation.
+     prints only a masked confirmation. If a different login is already saved
+     there, that login is kept, nothing is saved, and the command says so.
 
 ---
 
@@ -66,8 +79,9 @@ parameter Google uses; you do not need to compute anything.
 
 - **`keyword_cap`** the most keywords to price and analyse (default 300). This
   is the main cost lever: fewer keywords, cheaper run.
-- **`serp_top_n`** how many of the top keywords get a SERP (ranking) pull
-  (default 100).
+- **`serp_top_n`** how many keywords get a SERP (ranking) pull (default 100). They
+  are the highest-volume keywords of the ones priced; with no volumes available the
+  first keywords in listed order are used, and the run says so.
 - **`opportunity_kd_max`** the difficulty ceiling for the "winnable" list
   (default 40, the common easy-to-rank threshold).
 - **`budget_caps.phase1`** the hard spending cap in USD for the run. The tool
@@ -82,12 +96,18 @@ python3 scripts/search_intel.py --config SEARCH_CONFIG.json --workdir runs/my-ru
 ```
 
 This prints the full plan (keyword expansion, then volume/difficulty/CPC, then
-SERP) and a cost forecast for each stage, and spends **nothing**. Check the
+SERP) and a cost forecast for each step, and spends **nothing**. Check the
 forecast against your `budget_caps.phase1` before running for real.
 
 You can also do a tiny paid smoke test first with `--test-only`, which runs each
-stage on a handful of keywords and stops, so you see real output for a few cents
-before committing to the full run.
+step on a handful of keywords and stops, so you see real output before committing
+to the full run. That small pass is forecast at most about $0.18 with two seed terms
+(the example) and about $0.23 with five or more.
+
+If a step already finished in the run folder, running the same command again skips
+it and does not charge it again. To run every step again in the same folder, add
+`--force`: each step is charged again, so run `--dry-run` first. A new run folder
+does the same.
 
 ---
 
@@ -98,9 +118,9 @@ python3 scripts/search_intel.py --config SEARCH_CONFIG.json --workdir runs/my-ru
 ```
 
 The tool chains automatically: seed keywords, keyword expansion (autocomplete),
-volume / difficulty / CPC per keyword, the localized SERP for the top terms,
+volume / difficulty / CPC per keyword, the localized SERP for the highest-volume keywords,
 then a deterministic synthesis, then the report. It shows the forecast before
-each paid stage and stops at your budget cap.
+each paid step and stops at your budget cap.
 
 ---
 
@@ -116,6 +136,10 @@ serp/domain_map.json          Which domains own which keywords
 synthesis_facts.json          Every number, counted in code and source-tagged
 S1_search_landscape.md        The finished report
 ```
+
+A keyword that Semrush has no data for shows as "no data from Semrush" in the report
+and the app. That is a gap in what the tool could collect. It does not mean the
+keyword has 0 searches.
 
 **`S1_search_landscape.md` is the deliverable.** It has an executive summary,
 your keywords clustered by search intent, a measured keyword-demand table, a
@@ -149,3 +173,13 @@ generate the report yourself from that file.
 - **What it is:** real search-demand and SERP data on your own account, turned
   into a report you can act on. It is not a free version of any paid keyword tool,
   and it does not try to be one.
+
+---
+
+## Repeat it every month
+
+After a finished run, ask Claude to "set up a monthly repeat". You approve a spending
+ceiling once (the most one month may spend), and each month's run then starts by
+itself on this computer or in Claude's cloud, and does not start if its forecast is
+above the ceiling. To see what changed, ask "what changed since last month?". Read
+`docs/REPEATS.md` in the plugin before you set it up.

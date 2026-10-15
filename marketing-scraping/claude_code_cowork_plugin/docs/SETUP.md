@@ -27,13 +27,17 @@ your own (see below), and the plugin's scripts are reached through the
 ## What you need
 
 - **An Apify account and API token**, free to create at
-  [apify.com](https://apify.com). ad-intelligence and pain-and-messaging usually
-  stay inside Apify's free monthly credit; **search-intelligence meters per
-  keyword and needs a card** (~$2 to $5 per run).
-- **Claude Code CLI**, installed and signed in: the report-writing step calls it
-  locally, so there is no separate LLM API key and no per-report cost beyond your
-  normal Claude usage.
-- **Python 3**: standard library only, nothing to `pip install`.
+  [apify.com](https://apify.com). The pain-and-messaging example run is forecast
+  well inside Apify's free monthly credit; an ad-intelligence run can be forecast
+  above it, though a real run usually costs less; **search-intelligence meters per
+  keyword and needs a card** (a ~300-keyword run is forecast at about $3 to $7,
+  the higher figure on Apify's free plan; paid Apify plans cost less).
+- **Claude Code CLI**, installed and signed in: the pain-and-messaging and
+  search-intelligence report steps call it locally, so there is no separate LLM API
+  key and no per-report cost beyond your normal Claude usage. ad-intelligence uses
+  it only to read the text off Google ad images; its report is filled in from a
+  bundle by Claude in your session or any model you choose.
+- **Python 3.9 or newer** (a Mac already has it): standard library only, nothing to `pip install`.
 
 ## Give the tools your Apify token
 
@@ -48,7 +52,8 @@ the plugin is installed:
   reads `APIFY_TOKEN` first.
 - **Nothing to do: the token saves itself.** Whichever of the two routes above
   you use, the first run that reads `APIFY_TOKEN` from the environment also saves
-  it to `~/.apify/auth.json` automatically, so later runs never re-ask. To save it
+  it to `~/.apify/auth.json` automatically (unless a different login is already
+  saved there: that one is kept), so later runs never re-ask. To save it
   explicitly first, without running a scrape:
 
   ```bash
@@ -56,10 +61,10 @@ the plugin is installed:
   python3 ${CLAUDE_PLUGIN_ROOT}/skills/search-intelligence/scripts/config.py --persist-token
   ```
 
-  It reads the token from the environment (never the command line, so it cannot
-  leak into your shell history or process list), merges it into
-  `~/.apify/auth.json` without disturbing an existing `apify login`, and prints a
-  masked confirmation. Any of the three tools' `config.py` does this; they share
+  It reads the token from the environment (never as an argument), merges it into
+  `~/.apify/auth.json`, and prints a masked confirmation. If a different login is
+  already saved there, such as an earlier `apify login`, that login is kept,
+  nothing is saved, and the command says so. Any of the three tools' `config.py` does this; they share
   the same token file.
 
 **How long the saved token lasts.** In local Claude Code, `~/.apify/auth.json` is
@@ -94,13 +99,16 @@ reaches is only:
   - `api.apify.com`
 - **Free target resolution, before any spend:** the tools confirm your target
   against the real provider before charging anything:
-  - `itunes.apple.com` and `apps.apple.com` (App Store)
+  - `itunes.apple.com` (App Store)
   - `play.google.com` (Google Play)
   - `www.linkedin.com` (LinkedIn company lookup)
-  - **your competitor's own website(s):** the domains you put in the config
-    (e.g. `acmeplumbing.com`), used to find their Trustpilot page. These are the
+  - **the Trustpilot domains in your pain-and-messaging config** (for example
+    `acmeplumbing.com`): the tool asks each site whether it answers and where it
+    redirects, to catch a typo or a different name on Trustpilot. These are the
     only entries that vary by run, and you already know them: add the ones you
-    entered.
+    entered. A domain you did not allow shows as "could not be checked" and is used
+    as written; the run is not stopped. ad-intelligence does not fetch competitor
+    websites.
 - **Ad creatives, after the scrape (ad-intelligence only):** it downloads each
   ad's image to read the copy off it. Those live on content networks:
   - `tpc.googlesyndication.com` (Google)
@@ -168,6 +176,30 @@ so nothing is ever written into the read-only plugin install.
 
 ---
 
+## The local app (opens after every run)
+
+At the end of each run the skill opens the results in a small local app (the
+`marketing-viewer` skill). Nothing to install: it runs on the same Python as the tools,
+standard library only.
+
+- It runs on your computer only, at an address like `http://127.0.0.1:53817/`, and
+  reads only the run folders under the folder it was started on (by default
+  `marketing-research/`). It never scrapes, never spends money and never reads your
+  Apify token.
+- It opens in the browser built into the Claude desktop app when there is one, and
+  otherwise in your default browser.
+- It keeps running so you can come back to it. Ask Claude to stop it, or it stops
+  when you restart your computer.
+- It writes only small files in `.viewer` folders: your favorites, notes and trash,
+  and saved views, inside each run; the address of the running app and the page you
+  have open, in the root folder. The scraped data and reports are never changed.
+- A run made before the app existed shows as "not indexed". Ask Claude to re-index
+  it: that is free and reads only what is already on disk.
+- It needs your files to stay on your computer. In a cloud session there is nothing
+  lasting to show; Claude says so instead of starting it.
+
+---
+
 ## The money gate: always dry-run first
 
 These tools spend real money on **your** Apify account. Every tool supports
@@ -184,6 +216,23 @@ running up a surprise bill: if a review scraper is told to fetch a small number
 and tries to fetch far more, the cap stops the charge, not your card. You do not
 configure this. It is on for every run.
 
+**search-intelligence has one more request that is not in its forecast.** A keyword
+that comes back with no data from Semrush is asked for once more, usually at about
+$0.02 each. That request is counted inside your budget cap and in the total billed,
+but not in the forecast figure. If your budget cap is short for it by up to $0.25,
+nothing is spent and you are asked first. In a scheduled month nobody is there to
+ask, and the second request is still made when it fits inside the lower of your
+budget cap and the ceiling you approved. Only the case short by up to $0.25 waits:
+nothing is spent on it, and those keywords stay "no data from Semrush" until you next
+talk to Claude about that research and agree to the small extra cost. If it is short by
+more, only the keywords that fit inside the cap are asked for. A keyword with no data
+shows as "no data from Semrush", never as 0 searches.
+
+**A monthly repeat is approved once, as a ceiling.** When a repeat runs by itself,
+nobody is there to approve each month's forecast. You approve the most one month may
+spend, and a month whose forecast is above it does not start and spends nothing. See
+[REPEATS.md](REPEATS.md).
+
 **Set an account spend limit once, as a final backstop.** In the Apify console,
 under Billing, you can set a maximum you are willing to spend in a period. Do it
 once. It sits underneath everything above and catches anything unexpected. Apify
@@ -199,15 +248,22 @@ misspelled domain can resolve to nothing. The dry-run surfaces the resolved
 identity so you can catch a wrong target before you pay for it, not after.
 
 **Reading a zero result correctly.** If a source comes back with zero results,
-that has two very different meanings and the tools keep them separate:
+that can mean very different things, and the tools keep them separate:
 
 - **The target did not resolve** (no company id found, a domain that does not
   exist, a market label that produced no keywords). This is a *miss*: the tool
   could not find what to look at. It is flagged at the gate, and the fix is to
   correct the input.
-- **The target resolved fine, and there genuinely was no data** (a real company
-  that runs no ads on that network, a real product with no reviews yet). This is
-  a *fact* about the market.
+- **The target resolved fine, and nothing came back.** This can be a fact about
+  the market (a real company that runs no ads on that network, a real product
+  with no reviews yet), or a scraper that fetched nothing. When the scraper says
+  it did not work (for example, that it is under maintenance), the run names it
+  as a gap. Otherwise the tool cannot tell the two apart, so it calls the zero
+  unconfirmed rather than a fact.
+- **You asked for 0.** A source whose count setting is 0 is not run and costs
+  nothing; the run names it as not run by your settings, never as an empty result.
+  There are two exceptions. A category run in pain-and-messaging still pays to find
+  the places, and a search `keyword_cap` of 0 still pays for keyword ideas.
 
 Never treat the first as the second. "We could not find this company" is not the
 same as "this company runs no ads," and the tools are built so you can always

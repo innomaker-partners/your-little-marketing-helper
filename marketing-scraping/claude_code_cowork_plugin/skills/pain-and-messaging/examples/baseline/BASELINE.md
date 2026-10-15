@@ -77,9 +77,12 @@ contract.
   was never the wasted dollar; it was the silent zero a user would misread as "no
   reviews exist here." Run A therefore doubles as a **$0 smoke test** of the guard,
   safe to run any time.
-- **`budget_caps.phase1` is per-stage-subprocess, and must clear the forecast.**
-  Each stage runs in its own `run_phase` process with a fresh budget, so a Maps run
-  (B2a + B2b) can spend up to ~2× `phase1`, not one shared cap. And the value must
+- **`budget_caps.phase1` is one cap for the whole command, and must clear the forecast.**
+  Each stage runs in its own `run_phase` process but starts from what the command has
+  already spent, so a Maps run stops once what the places step spent plus the
+  reviews step's estimate would pass `phase1`. A resume, or any other re-run of the
+  folder by hand, is a new command that counts from $0 again. (These baseline runs
+  were recorded when each stage had its own budget.) And the value must
   sit **above** the B2a full-run forecast (~$0.43 for a 120-place discovery, from
   120 × $0.003 × 1.2 safety) or the pre-spend gate blocks the stage before it can
   even attempt the geocode. `0.60` is chosen for that headroom; do not lower it

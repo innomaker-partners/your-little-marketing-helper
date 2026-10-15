@@ -29,6 +29,19 @@ keyed by advertiser name and does not filter by country unless asked.
 
 import json
 from pathlib import Path
+from urllib.parse import quote
+
+
+def _q(value) -> str:
+    """One value made safe to place in an address.
+
+    Every character that is not a letter, digit or one of "_.-~" is
+    percent-encoded, so a value can never end itself early or add a parameter:
+    "AT&T internet" was sent as q=AT plus a stray "T internet" parameter, a
+    search for something the user did not ask about. Ordinary domains and
+    country codes come back unchanged.
+    """
+    return quote(str(value), safe="")
 
 
 # --- small helpers to read the competitor list from the workdir ---------------
@@ -144,6 +157,58 @@ def _resolved_linkedin_ids(workdir):
     return out
 
 
+def meta_words(terms):
+    """The search words in `terms` that are real words, in order, as text.
+
+    WHY: a word that is only whitespace (" ")
+    used to pass the `if t` filters, so a paid Meta search fired with a blank
+    query and the run claimed Meta was searched by the user's words. Blank means
+    absent: this is the one reading build_B4, ad_intel and the resolution report
+    use. A text word that has letters is kept exactly as written (its search
+    input must not change).
+
+    A `null` in the config (None) is absent, as it was
+    under base's `if t`; reading it as str(None) == "None" kept it as a word and
+    crashed the resolution report. Any value that is not text follows base's `if t`:
+    empty (0, false, [], {}) is absent, and one with content (a number, say) is
+    kept and returned as its text, which is exactly what base put in the search
+    URL, so the paid calls do not move and nothing downstream joins a non-text."""
+    return [t if isinstance(t, str) else str(t) for t in (terms or [])
+            if (t.strip() if isinstance(t, str) else t)]
+
+
+def meta_search_words(cfg):
+    """The config's `meta_search_terms` that are real words (see meta_words)."""
+    return meta_words(cfg.get("meta_search_terms"))
+
+
+def linkedin_countries(cfg):
+    """The LinkedIn country filter exactly as build_LI sends it (`countries`,
+    upper-case codes). [] means no filter: every country is searched."""
+    return [c.upper() for c in (cfg.get("linkedin_countries") or []) if c]
+
+
+_COUNTRY_WORDS = {"GB": "the UK", "UK": "the UK", "US": "the US"}
+
+
+def linkedin_where(cfg):
+    """' in the UK' (or ' in the UK and DE') when the LinkedIn search was limited
+    to some countries, '' when it was not. WHY: in a real run (linkedin_countries ["gb"]) a
+    LinkedIn zero was described as a worldwide search
+    and a fact about the company. A zero from a search limited to some countries
+    says nothing about the rest, so every zero line names the filter."""
+    words = []
+    for c in linkedin_countries(cfg):
+        w = _COUNTRY_WORDS.get(c, c)
+        if w not in words:
+            words.append(w)
+    if not words:
+        return ""
+    if len(words) == 1:
+        return f" in {words[0]}"
+    return " in " + ", ".join(words[:-1]) + " and " + words[-1]
+
+
 # --- per-stage input builders -------------------------------------------------
 # Each returns (actor_input_dict, expected_record_count). `test` truncates inputs.
 
@@ -160,6 +225,17 @@ def build_B1(cfg, workdir, test):
         "countryCode": cfg["country_code"], "languageCode": cfg.get("language", "en"),
     }
     return inp, len(queries)
+
+
+# How many ads past `limitPerSource` the Meta actor may return, and bill, per
+# input URL. Its own input schema says of that field: "Actual number might
+# exceed the given limit by upto 30" (curious_coder/facebook-ads-library-scraper). The paid runs
+# agree: limit 20 returned and
+# billed 29, 30 and 30 ads for one page, limit 100 returned and billed 120.
+# WHY it is in the count: build_B4's count is what the forecast, the spend cap
+# and the standing-approval gate price, and they promise "at most". Priced at
+# the limit alone, a limit-20 forecast of $0.01805 was beaten by a $0.02255 bill.
+META_LIMIT_OVERSHOOT = 30
 
 
 def build_B4(cfg, workdir, test):
@@ -188,7 +264,7 @@ def build_B4(cfg, workdir, test):
     cap = 20 if test else int(cfg.get("meta_limit_per_source", 200))
 
     pages = _resolved_facebook_pages(workdir)
-    sweep_terms = [t for t in (cfg.get("meta_search_terms") or []) if t]
+    sweep_terms = meta_search_words(cfg)
 
     # --- primary: by advertiser Page ---
     if pages:
@@ -201,15 +277,17 @@ def build_B4(cfg, workdir, test):
             "scrapePageAds.countryCode": country_code,
             "limitPerSource": cap,
         }
-        return inp, cap * len(pages)
+        return inp, (cap + META_LIMIT_OVERSHOOT) * len(pages)
 
     # --- secondary: explicit keyword sweep ---
     if sweep_terms:
         sweep_terms = sweep_terms[:3] if test else sweep_terms
         urls = [{"url": f"https://www.facebook.com/ads/library/?active_status=all&ad_type=all"
-                        f"&country={cc}&q={t}&search_type=keyword_unordered&media_type=all"}
+                        f"&country={_q(cc)}&q={_q(t)}&search_type=keyword_unordered"
+                        f"&media_type=all"}
                 for cc in countries for t in sweep_terms]
-        return {"urls": urls, "limitPerSource": cap}, cap * len(urls)
+        return ({"urls": urls, "limitPerSource": cap},
+                (cap + META_LIMIT_OVERSHOOT) * len(urls))
 
     # --- no target: never sweep silently ---
     return {"urls": []}, 0
@@ -274,7 +352,7 @@ def build_B5(cfg, workdir, test):
     countries = [c.upper() for c in (cfg.get("country_codes") or [cfg["country_code"]])]
     domains = _curated_domains(workdir)
     domains = domains[:2] if test else domains
-    start = [{"url": f"https://adstransparency.google.com/?region={cc}&domain={d}"}
+    start = [{"url": f"https://adstransparency.google.com/?region={_q(cc)}&domain={_q(d)}"}
              for cc in countries for d in domains]
     # In test mode, cap maxItems — not just the domain count. Without this cap
     # the actor can scrape hundreds of ads instead of the intended test sample
@@ -292,8 +370,22 @@ def build_B5(cfg, workdir, test):
     proxy = {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"]}
     if len(countries) == 1:
         proxy["apifyProxyCountry"] = countries[0]
+    # Expected count = the configured ceiling: `maxItems` per ACTOR RUN, times the
+    # number of runs the stage really makes (startUrls are batched B5_BATCH_SIZE
+    # to a run, see STAGES["B5"]). The actor's maxItems is a total per run, not per
+    # domain: paid test 05b sent 2 domains with maxItems 25 and got exactly 25 ads.
+    # WHY: this count sizes the forecast, the budget gate and the Apify spend cap
+    # (run_phase: forecast x CHARGE_CEILING_FACTOR). It used to be a flat 15 per
+    # domain, whatever google_max_items said. In a real run (a UK search, google_max_items 100, 1
+    # domain): forecast ~15 ads / $0.04, cap $0.07, and
+    # the run was stopped over budget at 83 of the 100 ads it was asked for.
+    # Counting maxItems per domain instead would inflate an N-domain run N-fold
+    # (2 domains at the default 2000 forecast ~$12 and failed the $10 budget).
+    # The batch spec's "per_run" flag makes run_phase give every batch one run's
+    # share of the cap, so a short last batch can still reach maxItems.
+    n_runs = -(-len(start) // B5_BATCH_SIZE)  # ceil: runs run_phase will launch
     return ({"startUrls": start, "maxItems": max_items,
-             "proxyConfiguration": proxy}, len(start) * 15)
+             "proxyConfiguration": proxy}, n_runs * max_items)
 
 
 # --- registry -----------------------------------------------------------------
@@ -303,12 +395,12 @@ def build_B5(cfg, workdir, test):
 B5_BATCH_SIZE = 10
 
 STAGES = {
-    "B1": {"actor": "apify/google-search-scraper",                "phase": "1", "folder": "B1_serp_competitors", "build": build_B1, "output": "dataset"},
-    "B4": {"actor": "curious_coder/facebook-ads-library-scraper", "phase": "1", "folder": "B4_meta_ad_library",  "build": build_B4, "output": "dataset", "memory_mb": 1024, "mem_per_url": 512},
-    "B5": {"actor": "lexis-solutions/google-ads-scraper",         "phase": "1", "folder": "B5_google_ads",       "build": build_B5, "output": "dataset", "batch": {"key": "startUrls", "size": B5_BATCH_SIZE}},
+    "B1": {"name": "Google search for competitors", "actor": "apify/google-search-scraper",                "phase": "1", "folder": "B1_serp_competitors", "build": build_B1, "output": "dataset"},
+    "B4": {"name": "Meta ad library", "actor": "curious_coder/facebook-ads-library-scraper", "phase": "1", "folder": "B4_meta_ad_library",  "build": build_B4, "output": "dataset", "memory_mb": 1024, "mem_per_url": 512},
+    "B5": {"name": "Google ads", "actor": "lexis-solutions/google-ads-scraper",         "phase": "1", "folder": "B5_google_ads",       "build": build_B5, "output": "dataset", "batch": {"key": "startUrls", "size": B5_BATCH_SIZE, "per_run": True}},
     # LI is NOT in PHASE_ORDER — it is invoked explicitly (like B4/B5)
     # because it is opt-in (include_linkedin config flag) and has no mem_per_url constraint.
-    "LI": {"actor": "scrapesage/linkedin-ad-library-scraper",     "phase": "1", "folder": "LI_linkedin_ads",    "build": build_LI, "output": "dataset"},
+    "LI": {"name": "LinkedIn ad library", "actor": "scrapesage/linkedin-ad-library-scraper",     "phase": "1", "folder": "LI_linkedin_ads",    "build": build_LI, "output": "dataset"},
 }
 
 # Default run order. B1 (discovery) is invoked on demand, not in the default ad-scrape order.

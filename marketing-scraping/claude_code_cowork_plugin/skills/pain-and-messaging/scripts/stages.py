@@ -109,7 +109,7 @@ def build_appstore(cfg, workdir, test):
     """
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from subjects import resolve_appstore_targets
+    from subjects import resolve_appstore_targets, store_country
     # Prefer the persisted, human-confirmed resolution (names→ids + validated ids)
     # written by pain_intel at the gate; falls back to fresh resolution if absent.
     app_ids = resolve_appstore_targets(cfg, workdir)
@@ -118,7 +118,8 @@ def build_appstore(cfg, workdir, test):
     max_items = 5 if test else int(cfg.get("app_max_reviews", 100))
     inp = {
         "appIds":   app_ids,
-        "country":  cfg.get("appstore_country", "us"),   # FROZEN: lowercase (App Store enum)
+        # FROZEN: lowercase (App Store enum). From country_code unless appstore_country is set.
+        "country":  store_country(cfg, "appstore")[0],
         "maxItems": max_items,
     }
     return (inp, max_items * len(app_ids))
@@ -133,7 +134,7 @@ def build_googleplay(cfg, workdir, test):
     """
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from subjects import resolve_googleplay_targets
+    from subjects import resolve_googleplay_targets, store_country
     # Prefer the persisted, human-confirmed resolution (names→packages + validated
     # packages) written by pain_intel at the gate; pure regex fallback otherwise.
     app_ids = resolve_googleplay_targets(cfg, workdir)
@@ -142,7 +143,8 @@ def build_googleplay(cfg, workdir, test):
     max_items = 5 if test else int(cfg.get("app_max_reviews", 100))
     inp = {
         "appIds":   app_ids,
-        "country":  cfg.get("googleplay_country", "US"),  # FROZEN: UPPERCASE (Google Play enum)
+        # FROZEN: UPPERCASE (Google Play enum). From country_code unless googleplay_country is set.
+        "country":  store_country(cfg, "googleplay")[0],
         "language": cfg.get("language", "en"),
         "sort":     "NEWEST",
         "maxItems": max_items,
@@ -232,7 +234,8 @@ def build_g2(cfg, workdir, test):
 def build_capterra(cfg, workdir, test):
     """Capterra reviews via azzouzana/capterra-reviews-scraper.
 
-    Cheapest ($0.0009/review, no start fee), fastest (4.7s), and cleanest of the
+    Cheapest ($0.0009/review on a paid plan, $0.001 on Apify's free plan, plus a
+    $0.005 per GB start charge, see config.START_EVENTS), fastest (4.7s), and cleanest of the
     Capterra bake-off -- and takes a profileUrls ARRAY (multi-competitor).
     Other evaluated actors returned garbage pros fields or carried start fees. sortOrder MOST_RECENT gives the natural low/high star mix (like
     build_g2's 'newest'); HIGHEST_COMPLETENESS_SCORE would bias toward long
@@ -274,27 +277,27 @@ def build_B2b(cfg, workdir, test):
 # --- registry -----------------------------------------------------------------
 
 STAGES = {
-    "B2a": {"actor": "compass/crawler-google-places",       "phase": "1", "folder": "B2a_maps_places",   "build": build_B2a,        "output": "dataset"},
-    "B2b": {"actor": "compass/google-maps-reviews-scraper", "phase": "1", "folder": "B2b_reviews",       "build": build_B2b,        "output": "dataset"},
+    "B2a": {"name": "Google Maps places", "actor": "compass/crawler-google-places",       "phase": "1", "folder": "B2a_maps_places",   "build": build_B2a,        "output": "dataset"},
+    "B2b": {"name": "Google Maps reviews", "actor": "compass/google-maps-reviews-scraper", "phase": "1", "folder": "B2b_reviews",       "build": build_B2b,        "output": "dataset"},
     # FROZEN: folder MUST be "trustpilot_reviews" -- extractor.load_source_corpus
     # reads <workdir>/trustpilot_reviews/run_02_full.json for source="trustpilot".
     # A different folder silently yields an empty corpus (silent empty corpus class of bug).
-    "TP":  {"actor": "automation-lab/trustpilot",           "phase": "1", "folder": "trustpilot_reviews", "build": build_trustpilot, "output": "dataset"},
+    "TP":  {"name": "Trustpilot reviews", "actor": "automation-lab/trustpilot",           "phase": "1", "folder": "trustpilot_reviews", "build": build_trustpilot, "output": "dataset"},
     # FROZEN: folders MUST be "appstore_reviews" and "googleplay_reviews" --
     # extractor.load_source_corpus reads <workdir>/<source>_reviews/run_02_full.json.
-    "AS":  {"actor": "thewolves/appstore-reviews-scraper",    "phase": "1", "folder": "appstore_reviews",   "build": build_appstore,   "output": "dataset"},
-    "GP":  {"actor": "thewolves/google-play-reviews-scraper", "phase": "1", "folder": "googleplay_reviews", "build": build_googleplay, "output": "dataset"},
+    "AS":  {"name": "App Store reviews", "actor": "thewolves/appstore-reviews-scraper",    "phase": "1", "folder": "appstore_reviews",   "build": build_appstore,   "output": "dataset"},
+    "GP":  {"name": "Google Play reviews", "actor": "thewolves/google-play-reviews-scraper", "phase": "1", "folder": "googleplay_reviews", "build": build_googleplay, "output": "dataset"},
     # FROZEN: folder MUST be "reddit_reviews" -- load_source_corpus reads
     # <workdir>/reddit_reviews/run_02_full.json for source="reddit". _pp_reddit
     # writes the BANDED corpus there (and reddit_neutral.json alongside).
-    "RD":  {"actor": "harshmaur/reddit-scraper",             "phase": "1", "folder": "reddit_reviews",     "build": build_reddit,     "output": "dataset"},
+    "RD":  {"name": "Reddit", "actor": "harshmaur/reddit-scraper",             "phase": "1", "folder": "reddit_reviews",     "build": build_reddit,     "output": "dataset"},
     # FROZEN: folders MUST be "g2_reviews" and "capterra_reviews" --
     # extractor.load_source_corpus reads <workdir>/<source>_reviews/run_02_full.json
     # for source="g2"/"capterra". A different folder silently yields an empty
     # corpus (silent empty corpus class of bug). G2 and Capterra are STAR-RATED, so no banding --
     # postprocess._pp_g2capterra maps the star straight onto the extractor's split.
-    "G2":  {"actor": "factden/g2-reviews-scraper",         "phase": "1", "folder": "g2_reviews",       "build": build_g2,       "output": "dataset"},
-    "CP":  {"actor": "azzouzana/capterra-reviews-scraper", "phase": "1", "folder": "capterra_reviews", "build": build_capterra, "output": "dataset"},
+    "G2":  {"name": "G2 reviews", "actor": "factden/g2-reviews-scraper",         "phase": "1", "folder": "g2_reviews",       "build": build_g2,       "output": "dataset"},
+    "CP":  {"name": "Capterra reviews", "actor": "azzouzana/capterra-reviews-scraper", "phase": "1", "folder": "capterra_reviews", "build": build_capterra, "output": "dataset"},
 }
 
 # B2a must precede B2b — it builds review_targets.json (via postprocess._pp_b2a),
@@ -556,7 +559,7 @@ if __name__ == "__main__":
           inp_as_full["country"] != inp_gp_full["country"], True)
 
     # ==========================================================================
-    # TEST 6 — build_g2 + build_capterra (Phase E)
+    # TEST 6 — build_g2 + build_capterra
     # ==========================================================================
     print("\n=== TEST 6: build_g2 + build_capterra ===")
     cfg_g2 = {

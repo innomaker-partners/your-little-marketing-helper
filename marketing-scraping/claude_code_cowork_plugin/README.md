@@ -34,11 +34,11 @@ convention, and the money gate. Read it once before your first run.
 Each is both an **auto-activating skill** (describe the task and it triggers) and
 an explicit **slash command**.
 
-| Tool | Command | What it answers | Typical cost per run |
+| Tool | Command | What it answers | Cost per run |
 |------|---------|-----------------|----------------------|
-| **ad-intelligence** | `/marketing-scraping:ad-intelligence` | What creative angles are my competitors running, across Meta, Google, and LinkedIn ads? | A few cents to ~$0.50 on your Apify account, often inside the free credit |
-| **pain-and-messaging** | `/marketing-scraping:pain-and-messaging` | What do customers in my market complain about, in their own words, and where is the gap I can win on? Reads reviews across Google Maps, Trustpilot, the App Store, Google Play, Reddit, G2, and Capterra. | A few cents to ~$0.50, often inside the free credit |
-| **search-intelligence** | `/marketing-scraping:search-intelligence` | What does my market search for, how hard is each keyword to rank for, and who already owns the results? | ~$2 to $5 (exceeds Apify's free credit, so this one needs a card) |
+| **ad-intelligence** | `/marketing-scraping:ad-intelligence` | What creative angles are my competitors running, across Meta, Google, and LinkedIn ads? | At most about $9.77 for 2 competitors at the example settings (a worst case, shown before anything is spent); a real run usually costs less |
+| **pain-and-messaging** | `/marketing-scraping:pain-and-messaging` | What do customers in my market complain about, in their own words, and where is the gap I can win on? Reads reviews across Google Maps, Trustpilot, the App Store, Google Play, Reddit, G2, and Capterra. | Forecast at about $0.43 to $0.49 for the example (3 businesses on Google Maps, 100 reviews each), the higher figure on Apify's free plan; more sources or reviews cost more, and the forecast is shown before anything is spent |
+| **search-intelligence** | `/marketing-scraping:search-intelligence` | What does my market search for, how hard is each keyword to rank for, and who already owns the results? | About $3 to $7 for ~300 keywords, the higher figure on Apify's free plan (exceeds its free credit, so this one needs a card) |
 
 ## What to say to trigger each tool
 
@@ -66,22 +66,58 @@ Every tool follows the same shape:
 1. The skill asks where this run's directory should live and names it per the
    convention, then copies a small config file into it for you to fill in (your
    market, competitors, country).
-2. It scrapes public data through your own Apify account, one metered stage at a
+2. It scrapes public data through your own Apify account, one metered step at a
    time.
 3. It shows you a cost forecast before it spends anything, waits for your go-ahead,
    and stops at a budget cap you set.
-4. It counts every number in code from the scraped data, then a local `claude`
-   call (your Claude Code CLI) clusters and writes the report. The write-up never
-   invents a figure; every number traces back to something that was actually
-   scraped.
+4. It counts every number in code from the scraped data. For pain-and-messaging
+   and search-intelligence, a local `claude` call (your Claude Code CLI) then
+   clusters and writes the report. ad-intelligence instead prepares a report
+   bundle (`PROMPT.md`, `DATA_DIGEST.md` and a blank report template) that Claude
+   in your session, or any model you choose, fills in; its only `claude` call
+   reads the text off Google ad images. The write-up never invents a figure; every
+   number traces back to something that was actually scraped.
+5. It opens the results in the local app (below), where you can check every record
+   behind the report and ask Claude about any of them.
+
+## The local app: see every record, and work through it with Claude
+
+When a run finishes, Claude opens its results in a small app that runs on your own
+computer. You see every ad (with the downloaded images and videos), every review and
+Reddit post, and the search tables, next to the written reports, with filters, a search
+box, favorites, notes and a trash you can always restore from.
+
+While it is open you can ask Claude about what you are looking at ("how many of these
+mention price?"). Claude reads the same records the app shows and can save a named view
+that appears in the app, so you see exactly the records it means. The app never scrapes,
+never spends money and never changes the scraped data; it only adds your marks and saved
+views next to it, in a `.viewer` folder inside each run.
+
+It opens after every run by default. Say you do not want it for a run and Claude skips
+it; say "open the app" any time to bring it back. It works where your files stay on your
+computer (Claude Code in a terminal or in the Claude desktop app); a cloud session has
+nothing lasting to show, and Claude will tell you so.
+
+## Repeat it every month
+
+Say "set up a monthly repeat" after a run. You approve a spending ceiling once, and
+each month's run then starts by itself and spends nothing if its forecast is above
+that ceiling. You choose whether it runs on your computer or in Claude's cloud (the
+cloud needs a private GitHub repository for your research). Ask "what changed since
+last month?" and the app compares the two months record by record. See
+**[docs/REPEATS.md](docs/REPEATS.md)** before you set it up.
 
 ## What you need
 
 - An **Apify account** and API token (free to create). search-intelligence meters
-  per keyword and needs a card; the other two usually stay inside the free credit.
-- **Claude Code CLI**, installed and signed in. The report step runs locally
-  through it, with no separate API key and no extra per-report cost.
-- **Python 3** (standard library only, nothing to `pip install`).
+  per keyword and needs a card. The pain-and-messaging example run is forecast well
+  inside the free credit; an ad-intelligence run can be forecast above it, though a
+  real run usually costs less. Every tool shows its forecast before spending.
+- **Claude Code CLI**, installed and signed in. The pain-and-messaging and
+  search-intelligence report steps run locally through it, with no separate API
+  key and no extra per-report cost. ad-intelligence uses it only to read the text
+  off Google ad images.
+- **Python 3.9 or newer** (a Mac already has it; standard library only, nothing to `pip install`).
 
 ## What these tools do not do
 

@@ -8,7 +8,7 @@
 >
 > **Multi-source note:** This worked example runs on a single Google Maps corpus, but a real run can combine several review sources (maps, trustpilot, appstore, googleplay, reddit, g2, capterra). When the corpus spans more than one source, the header must disclose N per source (from the `per_source` and `source_distribution` keys in the meta block) and every quote is attributed to its source. Any source with no real star ratings, such as reddit, has its pain/praise split inferred from language rather than a rating, so it must be flagged as directional wherever it appears.
 
-## Header block
+## About this analysis
 
 Generated: 2026-08-27. Source: gym / Test City low-star reviews, Google Maps (<=3 stars with text = 7 of 15 total; star distribution: 1 star x2, 2 star x5, 4 star x3, 5 star x5). _Single-source example; a multi-source run discloses N per source here. Small N: directional signal only, not statistically representative._
 

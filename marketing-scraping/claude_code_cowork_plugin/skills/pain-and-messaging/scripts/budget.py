@@ -7,6 +7,105 @@ refuses to launch a run whose estimate would blow it.
 """
 
 
+import json
+import os
+from pathlib import Path
+
+# The run ledger of an INTERACTIVE run.
+# WHY: an unattended run already keeps <workdir>/_run_ledger.json, and its
+# notification's "Total billed" is read from it. An interactive run kept no
+# record of the whole run's bill, so the only numbers it printed were each
+# stage's lines, rounded to cents, and the agent added those up ($0.27 for a
+# $0.281 run). The entry script names the ledger in this environment variable,
+# and every charge below is added to it, so both kinds of run end with the same
+# number, read by the same function. run_phase.py (committed, audited) is not
+# changed: its command line and output stay identical.
+# Only the entry script of an interactive run sets it; under a standing approval
+# run_phase writes the ledger itself and this variable is removed.
+RUN_LEDGER_ENV = "MARKETING_SCRAPING_RUN_LEDGER"
+
+
+def add_to_run_ledger(actual_usd):
+    """Add one paid call's bill to the ledger named by RUN_LEDGER_ENV, if set.
+
+    Never raises: the spending record must not change what a run does. A ledger
+    that is missing or unreadable is left as it is, so the run's total reads as
+    unknown instead of a number that silently leaves charges out."""
+    path = os.environ.get(RUN_LEDGER_ENV)
+    if not path:
+        return
+    try:
+        p = Path(path)
+        spent = float(json.loads(p.read_text(encoding="utf-8"))["spent"])
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps({"spent": round(spent + float(actual_usd or 0.0), 8)}),
+                       encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception:  # noqa: BLE001
+        return
+
+
+def usable_usd(value):
+    """value as a float when it is a finite dollar amount above zero, else None.
+
+    WHY: an approved ceiling of NaN or infinity was stored
+    and then every "forecast > ceiling" test was False for it, so the refusal that
+    protects the user's money could never fire. True and False are not amounts
+    (JSON true reads as 1 in Python). Text is not an amount either: the job file
+    is written by `repeat.py schedule`, which stores a number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    x = float(value)
+    if x != x or x in (float("inf"), float("-inf")) or x <= 0:
+        return None
+    return x
+
+
+def run_ledger_spent():
+    """What this run has already spent, read from the ledger named by
+    RUN_LEDGER_ENV: a float, or None when no ledger is named (no entry script
+    started this step, or the run is a dry run or runs under a standing approval,
+    where run_phase keeps the ledger itself).
+
+    WHY: every paid step runs as its own run_phase process
+    with a budget that started at $0, so a $0.10 cap held for each step and the
+    run billed $0.155. A step now starts its budget from this figure, so the cap
+    in budget_caps holds for the whole run. Raises ValueError when the ledger is
+    named but cannot be read or holds no usable figure: starting from $0 then
+    would hand the step the whole cap again, so the caller stops before any paid
+    call instead."""
+    path = os.environ.get(RUN_LEDGER_ENV)
+    if not path:
+        return None
+    try:
+        spent = json.loads(Path(path).read_text(encoding="utf-8"))["spent"]
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"this run's spending record {path} could not be read ({exc})")
+    if isinstance(spent, bool) or not isinstance(spent, (int, float)) \
+            or spent != spent or spent in (float("inf"), float("-inf")) or spent < 0:
+        raise ValueError(f"this run's spending record {path} holds {spent!r}, "
+                         f"not an amount spent")
+    return float(spent)
+
+
+def cap_text(usd):
+    """A cap or approved ceiling the user set, in dollars as set, without the "$":
+    two decimals when that is exact ("10.00", "0.40"), else the
+    fewest decimals that give back exactly the figure set ("0.205", "0.0135",
+    "0.008"). WHY: a cap of $0.205 printed as "$0.20", and a ceiling of $0.008 as
+    "$0.01", told the user a figure they never set, in a sentence about money they
+    approved. Never rounded: past twelve decimals it falls back to repr()."""
+    x = float(usd)
+    two = f"{x:.2f}"
+    if float(two) == x:
+        return two
+    for d in range(3, 13):
+        s = f"{x:.{d}f}"
+        if float(s) == x:
+            return s.rstrip("0")
+    return repr(x)
+
+
 class BudgetExceeded(Exception):
     pass
 
@@ -25,12 +124,13 @@ class Budget:
         if self.spent + estimate_usd > self.cap:
             raise BudgetExceeded(
                 f"Phase {self.phase}: estimate ${estimate_usd:.2f} + spent "
-                f"${self.spent:.2f} would exceed cap ${self.cap:.2f}. "
+                f"${self.spent:.2f} would exceed cap ${cap_text(self.cap)}. "
                 f"Raise budget_caps in the config, tighten inputs, or stop."
             )
 
     def charge(self, actual_usd):
         self.spent += float(actual_usd or 0.0)
+        add_to_run_ledger(actual_usd)
         return self.spent
 
     def enforce(self):
@@ -45,7 +145,7 @@ class Budget:
         if self.spent > self.cap:
             raise BudgetExceeded(
                 f"Phase {self.phase}: actual spend ${self.spent:.2f} has exceeded "
-                f"cap ${self.cap:.2f} by ${self.spent - self.cap:.2f}. "
+                f"cap ${cap_text(self.cap)} by ${self.spent - self.cap:.2f}. "
                 f"Stopping to prevent further overspend."
             )
 

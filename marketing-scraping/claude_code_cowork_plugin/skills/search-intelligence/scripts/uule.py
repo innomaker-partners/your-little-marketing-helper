@@ -11,7 +11,7 @@ Usage:
 
 The canonical location name format expected by the actor:
     "<City>,<State/Province>,<Country>"
-    e.g. "Budapest,Budapest,Hungary" or "München,Bavaria,Germany"
+    e.g. "Madrid,Madrid,Spain" or "München,Bavaria,Germany"
 
 NOTE: Whether the live actor actually accepts this string as a valid UULE is
 confirmed by a live paid test, not offline. If the actor rejects the encoded
@@ -72,7 +72,7 @@ def _selftest():
     # Case 2: round-trip — decode(encode(name)) == name — for several names.
     names = [
         "New York,New York,United States",
-        "Budapest,Budapest,Hungary",
+        "Madrid,Madrid,Spain",
         "München,Bavaria,Germany",        # non-ASCII: ü
         "Los Angeles,California,United States",  # contains comma
         "London,England,United Kingdom",

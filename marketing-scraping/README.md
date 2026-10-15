@@ -15,11 +15,11 @@ These are the tools our own team built to do competitor and market research with
 
 ## The three tools
 
-| Tool | What it answers | Typical cost per run |
-|------|-----------------|----------------------|
-| **ad-intelligence** | What creative angles are my competitors actually running, across Meta, Google, and LinkedIn ads? | A few cents to about $0.50 on your Apify account, often inside Apify's free monthly credit |
-| **pain-and-messaging** | What do customers in my market complain about, in their own words, and where is the gap I can win on? Reads reviews across Google Maps, Trustpilot, the App Store, Google Play, Reddit, G2, and Capterra. | A few cents to about $0.50, often inside Apify's free credit |
-| **search-intelligence** | What does my market search for, how hard is each keyword to rank for, and who already owns the results? | About $2 to $5, which exceeds Apify's free credit, so this one needs a card |
+| Tool | What it answers | Cost per run |
+|------|-----------------|--------------|
+| **ad-intelligence** | What creative angles are my competitors actually running, across Meta, Google, and LinkedIn ads? | At most about $9.77 for 2 competitors at the example settings (a worst case, shown before anything is spent); a run usually costs less than its forecast |
+| **pain-and-messaging** | What do customers in my market complain about, in their own words, and where is the gap I can win on? Reads reviews across Google Maps, Trustpilot, the App Store, Google Play, Reddit, G2, and Capterra. | Forecast at about $0.43 to $0.49 for the example (3 businesses on Google Maps, 100 reviews each), the higher figure on Apify's free plan; more sources or reviews cost more, and the forecast is shown before anything is spent |
+| **search-intelligence** | What does my market search for, how hard is each keyword to rank for, and who already owns the results? | About $3 to $7 for about 300 keywords, the higher figure on Apify's free plan (exceeds its free credit, so this one needs a card) |
 
 The three tools ship together as one installable plugin,
 `claude_code_cowork_plugin/`, which installs in both Claude Code and Cowork. Each
@@ -32,13 +32,16 @@ Every tool follows the same shape:
 1. You fill in a small config file (your market, your competitors, your country).
 2. The tool scrapes public data through your own Apify account, one metered stage at a time.
 3. It shows you a cost forecast before it spends anything, and stops at a budget cap you set.
-4. It counts every number in code from the scraped data, then a local `claude` call (your Claude Code CLI) clusters and writes the report. The write-up never invents a figure; every number traces back to something that was actually scraped.
+4. It counts every number in code from the scraped data. For pain-and-messaging and search-intelligence, a local `claude` call (your Claude Code CLI) then clusters and writes the report. ad-intelligence instead prepares a report bundle that Claude in your session, or any model you choose, fills in; its only `claude` call reads the text off Google ad images. The write-up never invents a figure; every number traces back to something that was actually scraped.
+5. It opens the results in a small app on your own computer, where you can check every record behind the report and ask Claude about any of them. See `claude_code_cowork_plugin/README.md`.
+
+Research worth doing again can repeat every month: you approve a spending ceiling once, and a month whose forecast is above it spends nothing. See `claude_code_cowork_plugin/docs/REPEATS.md`.
 
 ## What you need
 
-- An **Apify account** and API token (free to create). One tool, search-intelligence, meters per keyword and will cost more than the free monthly credit, so it needs a card on your Apify account. The other two usually stay inside the free credit.
-- **Claude Code CLI**, installed and signed in. The report step runs locally through it, so there is no separate API key to manage and no extra per-report cost beyond your normal Claude usage.
-- **Python 3** (standard library only, nothing to pip install).
+- An **Apify account** and API token (free to create). search-intelligence meters per keyword and needs a card on your Apify account. The pain-and-messaging example run is forecast well inside the free monthly credit; an ad-intelligence run can be forecast above it, though a run usually costs less than its forecast. Every tool shows its forecast before spending.
+- **Claude Code CLI**, installed and signed in. The pain-and-messaging and search-intelligence report steps run locally through it, with no separate API key and no extra per-report cost beyond your normal Claude usage. ad-intelligence uses it only to read the text off Google ad images.
+- **Python 3.9 or newer** (a Mac already has it; standard library only, nothing to pip install).
 
 ## What these tools do not do
 

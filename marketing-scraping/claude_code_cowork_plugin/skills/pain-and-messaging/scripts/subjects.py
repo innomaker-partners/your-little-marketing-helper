@@ -37,10 +37,19 @@ covered by 23 unit tests. The multi-key fallbacks handle actor-version variance
 gracefully.
 """
 
+from __future__ import annotations
+
 import json
 import re
 import sys
 from pathlib import Path
+
+# How a mode-2 note starts when no Google Maps place matched a competitor's name.
+# pain_intel tells "no place matched" apart from "no usable URL" by this start, so
+# both read the one constant (the note lost its step code "B2a"). The note
+# is returned in memory to pain_intel in the same run, never written to disk, so no
+# older wording needs matching.
+NO_PLACE_NOTE = "no Google Maps place matched this name"
 
 # ---------------------------------------------------------------------------
 # Known Maps aggregator / directory title keywords.
@@ -74,12 +83,169 @@ def _registrable(netloc: str) -> str:
     return ".".join(parts[-2:]) if len(parts) >= 2 else host
 
 
+# ---------------------------------------------------------------------------
+# A free lookup that could not be done is never "does not exist"
+# ---------------------------------------------------------------------------
+# WHY: every free pre-check here turned ANY failure into
+# "does not exist": offline, a timeout, or a host the cloud environment does not
+# allow read as "domain does not resolve (likely a typo)" or "no App Store match:
+# check the app name". The source was dropped, the month ended "Run complete",
+# and it became the base of the next repeat, so a source's history fell out of
+# the chain while the user was told their settings were wrong. Now only an
+# answer that says so means "does not exist": a name the DNS says is not
+# registered, or a store answer with no such app. Anything else is "could not be
+# checked", in a few plain words, and the caller decides what to use instead
+# (_earlier_entry: the earlier confirmed answer, else the target as written, or
+# a named gap).
+
+class LookupUnavailable(Exception):
+    """A free lookup could not be done. `why` is a few plain words."""
+
+    def __init__(self, why):
+        super().__init__(why)
+        self.why = why
+
+
+def _why_unavailable(exc) -> str:
+    """A few plain words for why a free lookup could not be done."""
+    import socket
+    import urllib.error
+    if isinstance(exc, LookupUnavailable):
+        return exc.why
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"the site answered with an error ({exc.code})"
+    reason = getattr(exc, "reason", exc)
+    text = str(reason)
+    if isinstance(reason, (socket.timeout, TimeoutError)) or "timed out" in text.lower():
+        return "the site did not answer in time"
+    if "Tunnel connection failed" in text:
+        # A proxy refused the site: what a cloud environment does with a host
+        # that is not on its allowed list.
+        return "this network does not allow the site"
+    if isinstance(exc, ValueError):  # the answer was not the JSON the store sends
+        return "the site's answer could not be read"
+    return "the site could not be reached"
+
+
+def _name_not_registered(exc) -> bool:
+    """True only when the DNS answered that the name does not exist.
+
+    WHY the control lookup: when a computer is offline, macOS answers EVERY name
+    with the same "nodename nor servname provided" error a real typo gets, so the
+    error alone cannot tell "no such domain" from "no internet". A name that the
+    DNS refuses while api.apify.com (which every run needs anyway) still
+    resolves is a name that does not exist. Behind a proxy the proxy resolves the
+    names, so a DNS error is about the proxy itself, never the domain."""
+    import socket
+    import urllib.request
+    reason = getattr(exc, "reason", None)
+    if not isinstance(reason, socket.gaierror):
+        return False
+    if reason.errno not in {getattr(socket, n) for n in ("EAI_NONAME", "EAI_NODATA")
+                            if hasattr(socket, n)}:
+        return False
+    if urllib.request.getproxies().get("https"):
+        return False
+    try:
+        socket.getaddrinfo("api.apify.com", 443)
+    except OSError:
+        return False
+    return True
+
+
+def _earlier_resolution(cfg: dict, workdir, folder: str) -> tuple:
+    """Entries by input from (1) this folder's own resolution.json, left by an
+    earlier run or dry run of this same folder, and (2) the previous month's,
+    the folder named by the config's repeat_of next to this one.
+    Returns (here, before, before_name). Read BEFORE this run overwrites (1)."""
+    def _load(p):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(data, list):
+            return {}
+        return {str(e.get("input", "")).strip(): e for e in data if isinstance(e, dict)}
+    if workdir is None:
+        return {}, {}, ""
+    here = _load(Path(workdir) / folder / "resolution.json")
+    prev = cfg.get("repeat_of")
+    before = {}
+    if isinstance(prev, str) and prev.strip() not in ("", ".", "..") \
+            and "/" not in prev and "\\" not in prev:
+        before = _load(Path(workdir).parent / prev / folder / "resolution.json")
+    return here, before, (prev if before else "")
+
+
+def _earlier_entry(raw: str, why: str, earlier: tuple, target_key: str, country=None):
+    """The entry to use for `raw` when its free check could not be done now, or
+    None when no earlier answer can stand in.
+
+    1. This folder's earlier answer for `raw`, when it was a real answer (an
+       entry without "unchecked"): it is what the person saw at the gate, so a
+       check that fails on the real run does not change it, either way.
+    2. The previous month's entry for `raw` when its check was really done (no
+       "unchecked"): either it found a target (`target_key`), or it found that
+       there is none ("not_found"). The target did not change, only the check
+       failed this time.
+    The copy carries "not_rechecked" (why) and, from the previous month,
+    "reused_from": the folder whose check actually ran, kept as it is however
+    many months have reused it since.
+
+    country: for the App Store and Google Play, the
+    store country the lookup is for. An entry is used only when it was checked
+    for this same country ("country" in the entry). An entry without one (written by an earlier
+    version) is not used: nothing says which country it was checked for, and
+    an app id found for one country may be another app, or none, in another.
+
+    WHY "not_found" and not just "no unchecked" for a "does not exist" answer:
+    every failed check used to be written as "does
+    not exist" ("domain does not resolve (likely a typo)" while offline), so a
+    negative answer without the mark may not be a real one. Reusing it would drop
+    a real source for good. A target that was found is real either way."""
+    here, before, before_name = earlier
+
+    def _same_country(e):
+        return country is None or e.get("country") == country
+    e = here.get(raw)
+    if isinstance(e, dict) and not e.get("unchecked") and _same_country(e):
+        out = dict(e)
+        out["not_rechecked"] = why
+        return out
+    e = before.get(raw)
+    if isinstance(e, dict) and not e.get("unchecked") and _same_country(e) \
+            and (e.get(target_key) or e.get("not_found")):
+        out = dict(e)
+        out["not_rechecked"] = why
+        out["reused_from"] = e.get("reused_from") or before_name
+        return out
+    return None
+
+
+def _not_rechecked_text(e: dict) -> str:
+    """The gate's words for an entry an earlier answer stood in for."""
+    where = (f"the result confirmed in {e['reused_from']} was used" if e.get("reused_from")
+             else "this folder's earlier check was used")
+    return f"not checked this time ({e['not_rechecked']}), so {where}"
+
+
+def _not_found_again_text(e: dict) -> str:
+    """The gate's words for an earlier "does not exist" answer that stands."""
+    where = (f"the check in {e['reused_from']}" if e.get("reused_from")
+             else "this folder's earlier check")
+    return (f"{where} found it does not exist, and it could not be checked again this "
+            f"time ({e['not_rechecked']}), so it is left out")
+
+
 def _domain_final(domain: str, timeout: int = 12):
     """Reachability + redirect check for a bare domain. Returns
-    (reachable: bool, final_registrable_domain: str). A HEAD that returns ANY
-    HTTP status (even 403) means the domain is live; only a DNS/connection error
-    means unreachable. Free — hits the company's OWN site, not trustpilot.com
-    (which bot-walls a bare GET)."""
+    (reachable, final_registrable_domain_or_why):
+      (True, domain)  -- the site answered (ANY HTTP status, even 403, means live);
+      (False, "")     -- the DNS answered that the name does not exist (a typo);
+      (None, why)     -- the check could not be done (offline, a timeout, a host
+                         this network does not allow): `why` in a few plain words.
+    Free — hits the company's OWN site, not trustpilot.com (which bot-walls a
+    bare GET)."""
     import urllib.request
     import urllib.error
     from urllib.parse import urlparse
@@ -92,8 +258,10 @@ def _domain_final(domain: str, timeout: int = 12):
         # Reachable but the server refused HEAD (403/405/etc.) — still a live domain.
         u = getattr(e, "url", "") or f"https://{domain}"
         return True, _registrable(urlparse(u).netloc)
-    except Exception:  # noqa: BLE001  (DNS/connection failure => not reachable)
-        return False, ""
+    except Exception as exc:  # noqa: BLE001  (classified below, never a guess)
+        if _name_not_registered(exc):
+            return False, ""
+        return None, _why_unavailable(exc)
 
 
 def resolve_trustpilot(cfg: dict, workdir=None) -> list:
@@ -107,8 +275,14 @@ def resolve_trustpilot(cfg: dict, workdir=None) -> list:
         domain is surfaced (~) so the user confirms which one Trustpilot lists —
         this is exactly the acmeplumbing.com → acme-plumbing.com case that silently
         returned zero before.
+      - a domain whose check could not be done: the earlier answer
+        for it (_earlier_entry), else the domain AS WRITTEN, marked "unchecked".
+        WHY as written: the check only catches typos, and the paid scrape the
+        user approved was priced on this domain (the forecast prices every
+        domain as written), so a failed check must not drop it.
     Writes trustpilot_reviews/resolution.json when workdir is given."""
     entries: list = []
+    earlier = _earlier_resolution(cfg, workdir, "trustpilot_reviews")
     for raw in (cfg.get("trustpilot_domains") or []):
         raw = str(raw).strip()
         if not raw:
@@ -118,18 +292,26 @@ def resolve_trustpilot(cfg: dict, workdir=None) -> list:
             continue
         if not _looks_like_domain(raw):
             entries.append({"input": raw, "kind": "domain", "url": "", "domain": "",
-                            "note": "not a domain like vans.com or a /review/ URL — skipped"})
+                            "note": "not a domain like vans.com or a /review/ URL, skipped"})
             continue
         reachable, final_dom = _domain_final(raw)
         url = f"https://www.trustpilot.com/review/{raw}"
-        if not reachable:
+        if reachable is None:
+            stand_in = _earlier_entry(raw, final_dom, earlier, "url")
+            entries.append(stand_in or {
+                "input": raw, "kind": "domain", "url": url, "domain": raw,
+                "note": f"could not be checked ({final_dom}), so it is used as written",
+                "unchecked": final_dom})
+        elif not reachable:
+            # "not_found": a real answer that the name does not exist, so a
+            # later month whose check cannot be done keeps it (_earlier_entry).
             entries.append({"input": raw, "kind": "domain", "url": "", "domain": raw,
-                            "note": "domain does not resolve (likely a typo) — Trustpilot would "
-                                    "find nothing"})
+                            "note": "domain does not resolve (likely a typo), so Trustpilot would "
+                                    "find nothing", "not_found": True})
         elif final_dom and final_dom != _registrable(raw):
             entries.append({"input": raw, "kind": "domain", "url": url, "domain": raw,
                             "redirect_to": final_dom,
-                            "note": f"redirects to {final_dom} — Trustpilot may list this company "
+                            "note": f"redirects to {final_dom}: Trustpilot may list this company "
                                     f"under {final_dom}; confirm which domain to use"})
         else:
             entries.append({"input": raw, "kind": "domain", "url": url, "domain": raw, "note": ""})
@@ -144,14 +326,23 @@ def resolve_trustpilot(cfg: dict, workdir=None) -> list:
 
 def format_trustpilot_report(entries: list) -> str:
     """Human-facing Trustpilot validation report shown at the gate."""
-    lines = ["", "-" * 60, "TRUSTPILOT VALIDATION — confirm before the paid scrape", "-" * 60]
+    lines = ["", "-" * 60, "TRUSTPILOT VALIDATION: confirm before the paid scrape", "-" * 60]
     any_flag = False
     for e in entries:
-        if e.get("url") and not e.get("note"):
+        if e.get("url") and e.get("not_rechecked"):
+            any_flag = True
+            lines.append(f"  ~ {e['input']!r} → {e['url']}  ({_not_rechecked_text(e)})")
+        elif e.get("url") and not e.get("note"):
             lines.append(f"  ✓ {e['input']!r} → {e['url']}")
+        elif e.get("url") and e.get("unchecked"):
+            any_flag = True
+            lines.append(f"  ~ {e['input']!r} → {e['url']}  ({e['note']})")
         elif e.get("url") and e.get("redirect_to"):
             any_flag = True
             lines.append(f"  ~ {e['input']!r} → {e['url']}  ({e['note']})")
+        elif e.get("not_rechecked"):
+            any_flag = True
+            lines.append(f"  ⚠ {e['input']!r} → {_not_found_again_text(e)}")
         else:
             any_flag = True
             lines.append(f"  ⚠ {e['input']!r} → {e.get('note','unresolved')}")
@@ -190,7 +381,7 @@ def resolve_trustpilot_targets(cfg: dict, workdir=None) -> list:
         elif _looks_like_domain(entry):
             urls.append(f"https://www.trustpilot.com/review/{entry}")
         else:
-            print(f"subjects [trustpilot]: WARNING -- skipping unrecognized entry: {entry!r} "
+            print(f"subjects [trustpilot] WARNING: skipping unrecognized entry: {entry!r} "
                   f"(expected a domain like vans.com or a full /review/ URL)")
     return urls
 
@@ -210,6 +401,46 @@ def _looks_like_domain(s: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Store country (App Store + Google Play)
+# ---------------------------------------------------------------------------
+
+# store -> (explicit config key, case the store's API wants, last-resort default)
+_STORE_COUNTRY = {
+    "appstore":   ("appstore_country",   str.lower, "us"),   # App Store enum: lowercase
+    "googleplay": ("googleplay_country", str.upper, "US"),   # Google Play enum: UPPERCASE
+}
+
+
+def store_country(cfg: dict, store: str) -> tuple:
+    """(country, where it came from) for the App Store or Google Play.
+
+    ONE source of truth for the free lookup at the gate (resolve_appstore /
+    resolve_googleplay) and the paid scrape (stages.build_appstore /
+    build_googleplay), so the apps confirmed at the gate are the apps scraped.
+
+    Order: an explicit appstore_country / googleplay_country wins, as written.
+    Otherwise the run's country_code, in the case the store wants. Only when
+    neither is set, the US store. Before this, the store country ignored
+    country_code entirely: a run set to "gb" silently scraped US reviews unless
+    the user knew the two hidden keys (a wrong-target error, found in a live UK run).
+    """
+    key, case, fallback = _STORE_COUNTRY[store]
+    explicit = str(cfg.get(key) or "").strip()
+    # "uk" is what users write for the United Kingdom; both stores
+    # call it "gb" (ISO 3166), as ad and search intelligence now read it.
+    if explicit.upper() == "UK":
+        return case("gb"), f"set by {key} ('uk' read as the United Kingdom, gb)"
+    if explicit:
+        return explicit, f"set by {key}"
+    cc = str(cfg.get("country_code") or "").strip()
+    if cc.upper() == "UK":
+        return case("gb"), "from country_code ('uk' read as the United Kingdom, gb)"
+    if cc:
+        return case(cc), "from country_code"
+    return fallback, "default, no country_code set"
+
+
+# ---------------------------------------------------------------------------
 # App Store subject resolution
 # ---------------------------------------------------------------------------
 
@@ -226,14 +457,52 @@ def _extract_appstore_id(entry: str) -> str:
 # --- iTunes Search + Lookup (free, official, deterministic) -------------------
 # App Store is the ONE pain source with a free first-party resolution API, so it
 # does NOT go through the (paid) SERP path the other sources use. Search turns a
-# name into a numeric id; Lookup validates a supplied id. Both degrade to [] on
-# any network/parse failure — the caller then surfaces the miss (never a guess).
+# name into a numeric id; Lookup validates a supplied id. An answer with no
+# such app is [] / None; a lookup that could not be done raises
+# LookupUnavailable, so the caller never calls it a wrong name.
 
 _ITUNES_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
 
 
+def _itunes_results(body: bytes) -> list:
+    """The app results of an iTunes Search or Lookup answer.
+
+    [] only when the answer is the store's own and says there is nothing: it
+    carries "resultCount" at 0, or a "results" list with no app in it. Anything
+    else raises LookupUnavailable: {}, [], {"errorMessage": ...}, an HTML page,
+    a body that is not JSON.
+
+    WHY: a hotel or office Wi-Fi page, a consent wall or
+    a rate-limit answer comes back as a 200 that is not the store's. It used to
+    read as "no such app", and now that answer is marked "not_found" and
+    stands in every later month whose check cannot be done (in the cloud: every
+    month). The user's real app was then dropped for good, with a report line
+    saying an earlier month found it does not exist."""
+    not_store = "the answer that came back was not the store's"
+    try:
+        data = json.loads(body.decode("utf-8", "ignore"))
+    except ValueError:
+        raise LookupUnavailable(not_store) from None
+    if not isinstance(data, dict) or not ("resultCount" in data or "results" in data):
+        raise LookupUnavailable(not_store)
+    count, results = data.get("resultCount"), data.get("results")
+    if "resultCount" in data and (isinstance(count, bool) or not isinstance(count, int)):
+        raise LookupUnavailable(not_store)
+    if "results" in data and not isinstance(results, list):
+        raise LookupUnavailable(not_store)
+    if count == 0:
+        return []
+    if results is None:  # a count above 0 but no results to read
+        raise LookupUnavailable(not_store)
+    apps = [r for r in results if isinstance(r, dict)]
+    if results and not apps:
+        raise LookupUnavailable(not_store)
+    return apps
+
+
 def _itunes_search(term: str, country: str = "us", limit: int = 5) -> list:
-    """iTunes Search for software by name. Returns raw result dicts ([] on failure)."""
+    """iTunes Search for software by name. Returns raw result dicts ([] when the
+    answer has none). Raises LookupUnavailable when the lookup could not be done."""
     import urllib.request
     import urllib.parse
     if not (term or "").strip():
@@ -244,14 +513,16 @@ def _itunes_search(term: str, country: str = "us", limit: int = 5) -> list:
                                  headers={"User-Agent": _ITUNES_UA})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
-            return (json.loads(r.read().decode("utf-8", "ignore")) or {}).get("results", []) or []
-    except Exception:  # noqa: BLE001  (network/parse — non-fatal; caller flags the miss)
-        return []
+            body = r.read()
+    except Exception as exc:  # noqa: BLE001  (could not be done: never "no such app")
+        raise LookupUnavailable(_why_unavailable(exc)) from exc
+    return _itunes_results(body)  # [] only on the store's own "none"
 
 
 def _itunes_lookup(app_id: str, country: str = "us") -> dict | None:
     """iTunes Lookup by numeric id — validates a supplied id resolves to a real
-    app. Returns the app dict, or None if the id matches nothing / on failure."""
+    app. Returns the app dict, or None if the answer says the id matches nothing.
+    Raises LookupUnavailable when the lookup could not be done."""
     import urllib.request
     import urllib.parse
     if not (app_id or "").strip():
@@ -261,10 +532,15 @@ def _itunes_lookup(app_id: str, country: str = "us") -> dict | None:
                                  headers={"User-Agent": _ITUNES_UA})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
-            results = (json.loads(r.read().decode("utf-8", "ignore")) or {}).get("results", []) or []
-    except Exception:  # noqa: BLE001
-        return None
-    return results[0] if results else None
+            body = r.read()
+    except Exception as exc:  # noqa: BLE001  (could not be done: never "no such app")
+        raise LookupUnavailable(_why_unavailable(exc)) from exc
+    # None only when the store's own answer holds no app with this id.
+    # A result for another id is not this app: it would be scraped in its place.
+    for app in _itunes_results(body):
+        if str(app.get("trackId") or "") == str(app_id).strip():
+            return app
+    return None
 
 
 def _appstore_name_score(query: str, track_name: str, seller: str) -> float:
@@ -311,19 +587,35 @@ def resolve_appstore(cfg: dict, workdir=None) -> list:
     stage reads) so resolution happens ONCE, inside the confirmation gate, and
     the paid stage reuses it. NEVER silently substitutes — a name that resolves
     to nothing, or an id that matches nothing, is returned with id='' + a note.
+
+    A lookup that could not be done is not "no match". The earlier
+    answer for that input stands in (_earlier_entry); without one, a name is
+    returned with id='' and "unchecked" (the run names it as not collected
+    because the check could not be done), and a supplied id is used as written
+    and marked "unchecked", as Google Play has always done for a package.
     """
-    country = cfg.get("appstore_country", "us")
+    country = store_country(cfg, "appstore")[0]
     entries: list = []
+    earlier = _earlier_resolution(cfg, workdir, "appstore_reviews")
 
     for name in (cfg.get("appstore_names") or []):
         name = str(name).strip()
         if not name:
             continue
-        results = _itunes_search(name, country, limit=5)
+        try:
+            results = _itunes_search(name, country, limit=5)
+        except LookupUnavailable as exc:
+            entries.append(_earlier_entry(name, exc.why, earlier, "id", country) or {
+                "input": name, "kind": "name", "id": "", "app_name": "", "seller": "",
+                "review_count": 0, "url": "", "score": 0.0, "unchecked": exc.why,
+                "note": f"the App Store lookup could not be done ({exc.why}), so this "
+                        f"app was not looked up"})
+            continue
         if not results:
             entries.append({"input": name, "kind": "name", "id": "", "app_name": "",
                             "seller": "", "review_count": 0, "url": "", "score": 0.0,
-                            "note": "no App Store match — verify the app name / country"})
+                            "note": "no App Store match: check the app name and country",
+                            "not_found": True})
             continue
         cands = [_entry_from_app(name, "name", a, name) for a in results]
         # RANKING (relevance gate, then popularity): among apps whose name/seller
@@ -352,9 +644,16 @@ def resolve_appstore(cfg: dict, workdir=None) -> list:
         if not app_id:
             entries.append({"input": raw, "kind": "id", "id": "", "app_name": "",
                             "seller": "", "review_count": 0, "url": "", "score": 0.0,
-                            "note": "not a numeric id or App Store URL — skipped"})
+                            "note": "not a numeric id or App Store URL, skipped"})
             continue
-        app = _itunes_lookup(app_id, country)
+        try:
+            app = _itunes_lookup(app_id, country)
+        except LookupUnavailable as exc:
+            entries.append(_earlier_entry(raw, exc.why, earlier, "id", country) or {
+                "input": raw, "kind": "id", "id": app_id, "app_name": "", "seller": "",
+                "review_count": 0, "url": "", "score": 0.5, "unchecked": exc.why,
+                "note": f"could not be checked ({exc.why}), so the id is used as written"})
+            continue
         if app:
             e = _entry_from_app(raw, "id", app, app.get("trackName") or "")
             e["score"] = 1.0  # a validated exact id is maximally confident
@@ -365,8 +664,13 @@ def resolve_appstore(cfg: dict, workdir=None) -> list:
             entries.append({"input": raw, "kind": "id", "id": "", "app_name": "",
                             "seller": "", "review_count": 0, "url": "", "score": 0.0,
                             "note": f"id {app_id} did not resolve to a real App Store app "
-                                    f"(check the id / country) — would scrape nothing"})
+                                    f"(check the id and country), so it would scrape nothing",
+                            "not_found": True})
 
+    # The store country each answer is for, so a later
+    # month reuses it only for the same country (_earlier_entry).
+    for e in entries:
+        e["country"] = country
     if workdir is not None:
         stage_dir = Path(workdir) / "appstore_reviews"
         stage_dir.mkdir(parents=True, exist_ok=True)
@@ -375,20 +679,34 @@ def resolve_appstore(cfg: dict, workdir=None) -> list:
     return entries
 
 
-def format_appstore_report(entries: list) -> str:
-    """Human-facing App Store resolution report shown at the dry-run gate."""
-    lines = ["", "-" * 60, "APP STORE RESOLUTION — confirm before the paid scrape", "-" * 60]
+def format_appstore_report(entries: list, country=None) -> str:
+    """Human-facing App Store resolution report shown at the dry-run gate.
+    country: the (country, source) pair from store_country, shown so the user
+    can see which country's store is looked up and scraped."""
+    lines = ["", "-" * 60, "APP STORE RESOLUTION: confirm before the paid scrape", "-" * 60]
+    if country:
+        lines.append(f"  App Store country: {country[0]} ({country[1]})")
     any_flag = False
     for e in entries:
-        if e.get("id") and not e.get("note"):
+        if e.get("id") and e.get("not_rechecked"):
+            any_flag = True
+            lines.append(f"  ~ {e['input']!r} → id {e['id']}  ({e.get('app_name') or 'app'} · "
+                         f"{_not_rechecked_text(e)})")
+        elif e.get("id") and not e.get("note"):
             lines.append(f"  ✓ {e['input']!r} → id {e['id']}  ({e['app_name']} · "
                          f"{e['seller']} · {e['review_count']:,} ratings)")
             for c in e.get("candidates") or []:
                 lines.append(f"      alt: {c['app_name']} · {c['seller']} "
                              f"(id {c['id']}, {c['review_count']:,} ratings)")
+        elif e.get("id") and e.get("unchecked"):
+            any_flag = True
+            lines.append(f"  ~ {e['input']!r} → id {e['id']}  ({e['note']})")
+        elif e.get("not_rechecked"):
+            any_flag = True
+            lines.append(f"  ⚠ {e['input']!r} → UNRESOLVED: {_not_found_again_text(e)}")
         else:
             any_flag = True
-            lines.append(f"  ⚠ {e['input']!r} → UNRESOLVED — {e.get('note','no match')}")
+            lines.append(f"  ⚠ {e['input']!r} → UNRESOLVED: {e.get('note','no match')}")
     lines.append("-" * 60)
     lines.append("CONFIRM the matches above (especially any ⚠) before approving spend."
                  if any_flag else "All App Store targets resolved and validated.")
@@ -426,7 +744,7 @@ def resolve_appstore_targets(cfg: dict, workdir=None) -> list:
     for raw in (cfg.get("appstore_app_ids") or []):
         i = _extract_appstore_id(raw)
         if not i:
-            print(f"subjects [appstore]: WARNING -- skipping unrecognized entry: {str(raw).strip()!r} "
+            print(f"subjects [appstore] WARNING: skipping unrecognized entry: {str(raw).strip()!r} "
                   f"(expected a numeric id like '324684580' or an App Store URL)")
         elif i not in seen:
             seen.add(i)
@@ -454,8 +772,9 @@ def _extract_gplay_package(entry: str) -> str:
 # block a bare GET, so THEY need a paid path; Play does not.
 
 def _gplay_search(name: str, country: str = "us", limit: int = 8) -> list:
-    """Ordered package ids from a Play store app search ([] on failure/block).
-    Google relevance-ranks results, so order is meaningful."""
+    """Ordered package ids from a Play store app search ([] when the page lists
+    none). Google relevance-ranks results, so order is meaningful. Raises
+    LookupUnavailable when the search could not be done."""
     import urllib.request
     import urllib.parse
     if not (name or "").strip():
@@ -466,15 +785,18 @@ def _gplay_search(name: str, country: str = "us", limit: int = 8) -> list:
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             html = r.read().decode("utf-8", "ignore")
-    except Exception:  # noqa: BLE001
-        return []
+    except Exception as exc:  # noqa: BLE001  (could not be done: never "no such app")
+        raise LookupUnavailable(_why_unavailable(exc)) from exc
     return list(dict.fromkeys(re.findall(r'/store/apps/details\?id=([a-zA-Z0-9._]+)', html)))
 
 
 def _gplay_details(package: str, country: str = "us"):
     """(True, app_name) if a package resolves to a real Play app, (False, '')
-    otherwise. Reads og:title on the public details page (name source + validator).
-    None on a network error (distinct from 'does not exist')."""
+    when Google Play answers 404 (no such app). Reads og:title on the public
+    details page (name source + validator). Raises LookupUnavailable when the
+    page could not be read (it returned None before, and callers still
+    read a None as "could not be checked"), and when a page came back that is
+    not a Play app page (below)."""
     import urllib.request
     import urllib.parse
     if not (package or "").strip():
@@ -487,12 +809,21 @@ def _gplay_details(package: str, country: str = "us"):
         with urllib.request.urlopen(req, timeout=20) as r:
             html = r.read().decode("utf-8", "ignore")
     except urllib.error.HTTPError as e:
-        return (False, "") if e.code == 404 else None
-    except Exception:  # noqa: BLE001
-        return None
+        if e.code == 404:
+            return (False, "")
+        raise LookupUnavailable(_why_unavailable(e)) from e
+    except Exception as exc:  # noqa: BLE001
+        raise LookupUnavailable(_why_unavailable(exc)) from exc
     m = re.search(r'<meta property="og:title" content="([^"]+)"', html)
     name = re.sub(r"\s*-\s*Apps on Google Play\s*$", "", m.group(1)).strip() if m else ""
-    return (bool(name), name)
+    if not name:
+        # A 200 page without an app title is not Google
+        # Play's answer: a hotel or office Wi-Fi page, a consent wall. Only a 404
+        # says the package does not exist; this one could not be checked. Read
+        # as "no such app", it was marked "not_found" and dropped the user's real
+        # package in every later month whose check could not be done.
+        raise LookupUnavailable("the page that came back was not the store's")
+    return (True, name)
 
 
 def resolve_googleplay(cfg: dict, workdir=None) -> list:
@@ -507,19 +838,41 @@ def resolve_googleplay(cfg: dict, workdir=None) -> list:
 
     Writes googleplay_reviews/resolution.json when workdir is given. Never
     silently substitutes — an unresolved name/package carries id='' + a note.
+
+    A search or page that could not be read is not "no match". The
+    earlier answer for that input stands in (_earlier_entry); without one, a
+    name is returned with id='' and "unchecked", and a supplied package is
+    passed through as written (as before), now also marked "unchecked".
     """
-    country = cfg.get("googleplay_country", "US")
+    country = store_country(cfg, "googleplay")[0]
     entries: list = []
+    earlier = _earlier_resolution(cfg, workdir, "googleplay_reviews")
+
+    def _details(pkg):
+        """_gplay_details, with "could not be read" as (None, why)."""
+        try:
+            res = _gplay_details(pkg, country)
+        except LookupUnavailable as exc:
+            return None, exc.why
+        return (res, "") if res is not None else (None, "Google Play could not be reached")
 
     for name in (cfg.get("googleplay_names") or []):
         name = str(name).strip()
         if not name:
             continue
-        packages = _gplay_search(name, country)
+        try:
+            packages = _gplay_search(name, country)
+        except LookupUnavailable as exc:
+            packages, why = None, exc.why
         chosen = None
         qtoks = set(re.findall(r"[a-z0-9]+", name.lower()))
-        for pkg in packages[:6]:
-            ok, app_name = (_gplay_details(pkg, country) or (False, ""))
+        for pkg in (packages or [])[:6]:
+            res, why_pkg = _details(pkg)
+            if res is None:
+                # A page that could not be read is not a non-matching app.
+                packages, why = None, why_pkg
+                break
+            ok, app_name = res
             if not ok:
                 continue
             atoks = set(re.findall(r"[a-z0-9]+", app_name.lower()))
@@ -528,6 +881,13 @@ def resolve_googleplay(cfg: dict, workdir=None) -> list:
                           "url": f"https://play.google.com/store/apps/details?id={pkg}",
                           "score": round(len(qtoks & atoks) / max(1, len(qtoks)), 3)}
                 break
+        if chosen is None and packages is None:
+            entries.append(_earlier_entry(name, why, earlier, "id", country) or {
+                "input": name, "kind": "name", "id": "", "app_name": "", "url": "",
+                "score": 0.0, "unchecked": why,
+                "note": f"the Google Play lookup could not be done ({why}), so this app "
+                        f"was not looked up"})
+            continue
         entries.append(chosen or {"input": name, "kind": "name", "id": "", "app_name": "",
                                   "url": "", "score": 0.0,
                                   "note": "no name-matching Play app found (search blocked or "
@@ -540,16 +900,19 @@ def resolve_googleplay(cfg: dict, workdir=None) -> list:
         pkg = _extract_gplay_package(raw)
         if not pkg:
             entries.append({"input": raw, "kind": "id", "id": "", "app_name": "", "url": "",
-                            "score": 0.0, "note": "not a package name or Play URL — skipped"})
+                            "score": 0.0, "note": "not a package name or Play URL, skipped"})
             continue
-        res = _gplay_details(pkg, country)
+        res, why = _details(pkg)
         if res is None:
             # Network error — cannot validate; pass the package through unvalidated
-            # rather than dropping a probably-good id on a transient failure.
-            entries.append({"input": raw, "kind": "id", "id": pkg, "app_name": "",
-                            "url": f"https://play.google.com/store/apps/details?id={pkg}",
-                            "score": 0.5, "note": "could not validate (Play unreachable) — "
-                                                  "passing the supplied package through"})
+            # rather than dropping a probably-good id on a transient failure
+            # (unless an earlier answer for it can stand in).
+            entries.append(_earlier_entry(raw, why, earlier, "id", country) or {
+                "input": raw, "kind": "id", "id": pkg, "app_name": "",
+                "url": f"https://play.google.com/store/apps/details?id={pkg}",
+                "score": 0.5, "unchecked": why,
+                "note": f"could not be checked ({why}), so the supplied package is "
+                        f"passed through"})
         elif res[0]:
             entries.append({"input": raw, "kind": "id", "id": pkg, "app_name": res[1],
                             "url": f"https://play.google.com/store/apps/details?id={pkg}",
@@ -560,8 +923,11 @@ def resolve_googleplay(cfg: dict, workdir=None) -> list:
             # on purpose (transient failure, probably-good user-supplied package).
             entries.append({"input": raw, "kind": "id", "id": "", "app_name": "", "url": "",
                             "score": 0.0, "note": f"package {pkg} did not resolve to a real Play "
-                                                  f"app (check the package / country)"})
+                                                  f"app (check the package / country)",
+                            "not_found": True})
 
+    for e in entries:  # The country each answer is for (see the App Store)
+        e["country"] = country
     if workdir is not None:
         stage_dir = Path(workdir) / "googleplay_reviews"
         stage_dir.mkdir(parents=True, exist_ok=True)
@@ -570,20 +936,29 @@ def resolve_googleplay(cfg: dict, workdir=None) -> list:
     return entries
 
 
-def format_googleplay_report(entries: list) -> str:
-    """Human-facing Google Play resolution report shown at the dry-run gate."""
-    lines = ["", "-" * 60, "GOOGLE PLAY RESOLUTION — confirm before the paid scrape", "-" * 60]
+def format_googleplay_report(entries: list, country=None) -> str:
+    """Human-facing Google Play resolution report shown at the dry-run gate.
+    country: the (country, source) pair from store_country (see the App Store twin)."""
+    lines = ["", "-" * 60, "GOOGLE PLAY RESOLUTION: confirm before the paid scrape", "-" * 60]
+    if country:
+        lines.append(f"  Google Play country: {country[0]} ({country[1]})")
     any_flag = False
     for e in entries:
-        if e.get("id") and not e.get("note"):
+        if e.get("id") and e.get("not_rechecked"):
+            any_flag = True
+            lines.append(f"  ~ {e['input']!r} → {e['id']}  ({_not_rechecked_text(e)})")
+        elif e.get("id") and not e.get("note"):
             nm = f"  ({e['app_name']})" if e.get("app_name") else ""
             lines.append(f"  ✓ {e['input']!r} → {e['id']}{nm}")
         elif e.get("id") and e.get("note"):  # passed through unvalidated
             any_flag = True
             lines.append(f"  ~ {e['input']!r} → {e['id']}  ({e['note']})")
+        elif e.get("not_rechecked"):
+            any_flag = True
+            lines.append(f"  ⚠ {e['input']!r} → UNRESOLVED: {_not_found_again_text(e)}")
         else:
             any_flag = True
-            lines.append(f"  ⚠ {e['input']!r} → UNRESOLVED — {e.get('note','no match')}")
+            lines.append(f"  ⚠ {e['input']!r} → UNRESOLVED: {e.get('note','no match')}")
     lines.append("-" * 60)
     lines.append("CONFIRM the matches above (especially any ⚠) before approving spend."
                  if any_flag else "All Google Play targets resolved and validated.")
@@ -614,7 +989,7 @@ def resolve_googleplay_targets(cfg: dict, workdir=None) -> list:
     for raw in (cfg.get("googleplay_app_ids") or []):
         i = _extract_gplay_package(raw)
         if not i:
-            print(f"subjects [googleplay]: WARNING -- skipping unrecognized entry: {str(raw).strip()!r} "
+            print(f"subjects [googleplay] WARNING: skipping unrecognized entry: {str(raw).strip()!r} "
                   f"(expected a package like 'com.spotify.music' or a Google Play URL)")
         elif i not in seen:
             seen.add(i)
@@ -623,7 +998,7 @@ def resolve_googleplay_targets(cfg: dict, workdir=None) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Reddit subject resolution (Phase D)
+# Reddit subject resolution
 # ---------------------------------------------------------------------------
 
 def resolve_reddit_targets(cfg: dict) -> dict:
@@ -662,7 +1037,7 @@ def resolve_reddit_targets(cfg: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# G2 / Capterra subject resolution (Phase E)
+# G2 / Capterra subject resolution
 # ---------------------------------------------------------------------------
 
 def _validate_g2_url(entry: str) -> str:
@@ -677,7 +1052,8 @@ def _validate_g2_url(entry: str) -> str:
     return ""
 
 
-def discover_g2_products(name: str, max_products: int = 5):
+def discover_g2_products(name: str, max_products: int = 5, max_charge_usd=None,
+                         on_charge=None):
     """Resolve a G2 product NAME to its canonical slug by running factden in its
     'products' (discover) mode — G2 hard-blocks a free GET, so this is a small
     PAID actor run (each product row costs $0.004). Returns (entry, cost_usd):
@@ -689,17 +1065,32 @@ def discover_g2_products(name: str, max_products: int = 5):
     Ranking: the actor tags an 'exact' matchType and returns a reviewCount; the
     product the user means is the exact match, or the most-reviewed among the
     name-token matches. This mirrors the App Store relevance-gate-then-popularity
-    rule, using signals the discover run already computes."""
+    rule, using signals the discover run already computes.
+
+    max_charge_usd / on_charge both default to None, and with both None this
+    function makes exactly the call it always made. pain_intel sets them on
+    every real lookup: under a standing approval its G2 spend guard sets both,
+    and an interactive run sets both too (_G2LookupLimit: its own
+    forecast times the ceiling factor as the cap, and its bill to the run's
+    ledger).
+      max_charge_usd -- passed to run_actor as Apify's hard spend cap.
+      on_charge      -- called with what this run billed, BEFORE its status is
+                        judged, so an aborted or failed run's charge still
+                        reaches the run's spending record."""
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parent))
     import apify_client as A
     inp = {"mode": "products", "searchQuery": name, "maxProducts": int(max_products)}
-    run = A.run_actor("factden/g2-reviews-scraper", inp)
+    run = A.run_actor("factden/g2-reviews-scraper", inp, max_charge_usd=max_charge_usd)
+    charged = None
+    if on_charge is not None:
+        charged = A.actual_charge_usd(run or {})
+        on_charge(charged)
     if (run or {}).get("status") != "SUCCEEDED":
         raise RuntimeError(f"G2 discover for {name!r} did not succeed "
-                           f"(status={(run or {}).get('status')}) — STOP, do not retry without approval")
+                           f"(status={(run or {}).get('status')}). STOP: do not retry without approval")
     rows = A.fetch_dataset(run.get("defaultDatasetId")) or []
-    cost = A.actual_charge_usd(run)
+    cost = A.actual_charge_usd(run) if charged is None else charged
     qtoks = set(re.findall(r"[a-z0-9]+", name.lower()))
 
     def score(r):
@@ -731,14 +1122,25 @@ def discover_g2_products(name: str, max_products: int = 5):
     return (best, cost)
 
 
-def resolve_g2(cfg: dict, workdir=None, discover: bool = False) -> tuple:
+def resolve_g2(cfg: dict, workdir=None, discover: bool = False, spend_guard=None,
+               on_charge=None) -> tuple:
     """Resolve + validate G2 targets. Returns (entries, total_cost_usd).
 
     g2_urls / bare slugs → format-validated (free). g2_names → resolved to a slug
     only when discover=True (a paid factden discover run per name); when
     discover=False (dry-run) each name is listed as a pending resolution with its
     forecast cost, spending nothing. Writes g2_reviews/resolution.json when
-    workdir is given."""
+    workdir is given.
+
+    spend_guard (standing approval only; None otherwise): an object with
+    cap_for_discover(max_products) -> the Apify hard cap for the next discover
+    run (it raises to stop the run before that call), and record(cost_usd),
+    called with each discover run's bill. It is asked before EVERY name, so each
+    cap reflects what the earlier names already spent.
+
+    on_charge (interactive runs; ignored when spend_guard is set): called with
+    each discover run's bill, so the interactive run's ledger holds it too. It does not change
+    the call: no cap is added."""
     entries: list = []
     total_cost = 0.0
     for raw in (cfg.get("g2_urls") or []):
@@ -750,7 +1152,7 @@ def resolve_g2(cfg: dict, workdir=None, discover: bool = False) -> tuple:
             entries.append({"input": raw, "kind": "url", "slug": ok, "url": ok, "note": ""})
         else:
             entries.append({"input": raw, "kind": "url", "slug": "", "url": "",
-                            "note": "not a g2.com/products URL or a bare slug — skipped"})
+                            "note": "not a g2.com/products URL or a bare slug, skipped"})
 
     max_products = int(cfg.get("g2_discover_max_products", 5))
     for name in (cfg.get("g2_names") or []):
@@ -758,11 +1160,19 @@ def resolve_g2(cfg: dict, workdir=None, discover: bool = False) -> tuple:
         if not name:
             continue
         if not discover:
+            import config as _C  # the lookup run's start charge (bill fix)
             entries.append({"input": name, "kind": "name", "slug": "", "url": "",
-                            "note": f"pending discovery (~${max_products * 0.004:.3f}) — "
+                            "note": f"pending discovery (~${max_products * 0.004 + _C.start_fee_usd('G2'):.3f}); "
                                     f"resolved on the real run"})
             continue
-        entry, cost = discover_g2_products(name, max_products)
+        if spend_guard is None:
+            entry, cost = (discover_g2_products(name, max_products) if on_charge is None
+                           else discover_g2_products(name, max_products, on_charge=on_charge))
+        else:
+            entry, cost = discover_g2_products(
+                name, max_products,
+                max_charge_usd=spend_guard.cap_for_discover(max_products),
+                on_charge=spend_guard.record)
         total_cost += cost
         entries.append(entry)
 
@@ -776,7 +1186,7 @@ def resolve_g2(cfg: dict, workdir=None, discover: bool = False) -> tuple:
 
 def format_g2_report(entries: list) -> str:
     """Human-facing G2 resolution report shown at the gate."""
-    lines = ["", "-" * 60, "G2 RESOLUTION — confirm before the paid review scrape", "-" * 60]
+    lines = ["", "-" * 60, "G2 RESOLUTION: confirm before the paid review scrape", "-" * 60]
     any_flag = False
     for e in entries:
         if e.get("slug") and not e.get("note"):
@@ -791,7 +1201,7 @@ def format_g2_report(entries: list) -> str:
             lines.append(f"  … {e['input']!r} → {e['note']}")
         else:
             any_flag = True
-            lines.append(f"  ⚠ {e['input']!r} → UNRESOLVED — {e.get('note','no match')}")
+            lines.append(f"  ⚠ {e['input']!r} → UNRESOLVED: {e.get('note','no match')}")
     lines.append("-" * 60)
     lines.append("CONFIRM the matches above (especially any ⚠) before approving spend."
                  if any_flag else "All G2 targets resolved.")
@@ -822,7 +1232,7 @@ def resolve_g2_targets(cfg: dict, workdir=None) -> list:
     for raw in (cfg.get("g2_urls") or []):
         ok = _validate_g2_url(raw)
         if not ok:
-            print(f"subjects [g2]: WARNING -- skipping unrecognized entry: {str(raw).strip()!r} "
+            print(f"subjects [g2] WARNING: skipping unrecognized entry: {str(raw).strip()!r} "
                   f"(expected a g2.com/products/<slug> URL or a bare slug like 'slack')")
         elif ok not in seen:
             seen.add(ok)
@@ -862,7 +1272,7 @@ def resolve_capterra(cfg: dict, workdir=None) -> list:
             entries.append({"input": raw, "kind": "url", "url": ok, "note": ""})
         else:
             entries.append({"input": raw, "kind": "url", "url": "",
-                            "note": "not a capterra.com/p/<id>/<slug> URL — skipped"})
+                            "note": "not a capterra.com/p/<id>/<slug> URL, skipped"})
     if workdir is not None:
         stage_dir = Path(workdir) / "capterra_reviews"
         stage_dir.mkdir(parents=True, exist_ok=True)
@@ -873,7 +1283,7 @@ def resolve_capterra(cfg: dict, workdir=None) -> list:
 
 def format_capterra_report(entries: list) -> str:
     """Human-facing Capterra validation report shown at the gate."""
-    lines = ["", "-" * 60, "CAPTERRA VALIDATION — confirm before the paid scrape", "-" * 60]
+    lines = ["", "-" * 60, "CAPTERRA VALIDATION: confirm before the paid scrape", "-" * 60]
     any_flag = False
     for e in entries:
         if e.get("url") and not e.get("note"):
@@ -910,7 +1320,7 @@ def resolve_capterra_targets(cfg: dict, workdir=None) -> list:
     for raw in (cfg.get("capterra_urls") or []):
         ok = _validate_capterra_url(raw)
         if not ok:
-            print(f"subjects [capterra]: WARNING -- skipping unrecognized entry: {str(raw).strip()!r} "
+            print(f"subjects [capterra] WARNING: skipping unrecognized entry: {str(raw).strip()!r} "
                   f"(expected a capterra.com/p/<id>/<slug> URL)")
         elif ok not in seen:
             seen.add(ok)
@@ -935,6 +1345,19 @@ def detect_mode(cfg: dict) -> str:
     return "3"
 
 
+def runs_b2a(mode: str) -> bool:
+    """Whether a run in this subject mode runs B2a (Maps discovery).
+
+    Mode 1 (place URLs supplied) never does: resolve_mode1 writes the URLs
+    straight into review_targets.json. Modes 2 and 3 do. pain_intel.main()
+    branches on this and pain_intel._pain_forecast_usd prices B2a only when
+    it is true, so the forecast cannot price a discovery step the run skips.
+    It once did: every mode-1 forecast carried a 120-place '<vertical>
+    <city>' search ($0.432) on runs whose real stages cost about $0.02.
+    """
+    return mode != "1"
+
+
 # ---------------------------------------------------------------------------
 # MODE 1 — Place URLs provided directly
 # ---------------------------------------------------------------------------
@@ -951,7 +1374,7 @@ def resolve_mode1(cfg: dict, workdir) -> list:
     stage_dir.mkdir(parents=True, exist_ok=True)
     _write_targets(stage_dir, targets)
     print(f"subjects [mode 1]: {len(targets)} place URL(s) written directly -> review_targets.json")
-    print("  B2a (Maps discovery) is SKIPPED — URLs are used as-is.")
+    print("  The Google Maps places search is SKIPPED: the URLs are used as they are.")
     return targets
 
 
@@ -1017,7 +1440,7 @@ def select_mode2_targets(names: list, b2a_stage_dir, workdir) -> list:
     # as candidates for every name (title-overlap matching still picks correctly).
     no_grouping = all(k == "" for k in grouped) and items
     if no_grouping:
-        print("subjects [mode 2]: WARNING — no searchString field in B2a output; "
+        print("subjects [mode 2] WARNING: no searchString field in the Google Maps places output; "
               "falling back to full-list candidate matching (verify searchString field names)")
         ungrouped_all = items
     else:
@@ -1037,14 +1460,14 @@ def select_mode2_targets(names: list, b2a_stage_dir, workdir) -> list:
         clean = [c for c in candidates if not _is_maps_aggregator(c)]
         if not clean and candidates:
             print(f"  [warn] all {len(candidates)} candidates for '{name}' look like "
-                  "aggregators — keeping them and flagging for manual review")
+                  "aggregators; keeping them and flagging them for manual review")
             clean = candidates
 
         if not clean:
             results.append({
                 "name": name, "url": None, "title": "",
-                "note": ("no B2a record matched this name — verify B2a ran and the "
-                         "name is findable on Maps"),
+                "note": (NO_PLACE_NOTE + ": check that the Google Maps places search ran "
+                         "and the name is findable on Maps"),
             })
             continue
 
@@ -1058,8 +1481,8 @@ def select_mode2_targets(names: list, b2a_stage_dir, workdir) -> list:
         if not url:
             results.append({
                 "name": name, "url": None, "title": title,
-                "note": ("matched place record but no URL extracted — "
-                         "verify field names on a live named-competitor run"),
+                "note": ("matched a place record but no URL was extracted: "
+                         "check the field names on a live named-competitor run"),
             })
             continue
 
@@ -1067,7 +1490,7 @@ def select_mode2_targets(names: list, b2a_stage_dir, workdir) -> list:
         is_agg = _is_maps_aggregator(best)
         note = f"matched '{title}' ({reviews} reviews)"
         if is_agg:
-            note += " [looks like aggregator — verify manually]"
+            note += " [looks like an aggregator: check it by hand]"
         results.append({"name": name, "url": url, "title": title, "note": note})
 
     # Write review_targets.json (ALL matched places — no cap for mode 2).
@@ -1099,7 +1522,7 @@ def _load_b2a_output(stage_dir: Path) -> list:
             try:
                 return json.loads(p.read_text(encoding="utf-8"))
             except Exception as e:
-                print(f"subjects: WARNING — could not parse {p}: {e}")
+                print(f"subjects WARNING: could not parse {p}: {e}")
     return []
 
 
@@ -1267,7 +1690,7 @@ if __name__ == "__main__":
     # ==========================================================================
     print("\n=== TEST 4: Mode 2b — best-match selection ===")
 
-    # ASSUMED field names: searchString, url, title, reviewsCount (# VERIFY Phase 3)
+    # ASSUMED field names: searchString, url, title, reviewsCount (# VERIFY)
     FIXTURE_B2A = [
         # Planet Fitness — aggregator listing (must be skipped)
         {
@@ -1408,7 +1831,7 @@ if __name__ == "__main__":
 
     # ==========================================================================
     # TEST 7 — _is_maps_aggregator: a /maps/search/ URL carrying query_place_id
-    #          is a REAL place, not an aggregator (Phase-8 live-run regression)
+    #          is a REAL place, not an aggregator (live-run regression)
     # ==========================================================================
     print("\n=== TEST 7: _is_maps_aggregator honors query_place_id ===")
     # The exact URL shape compass/crawler-google-places emits for a real place.
@@ -1586,7 +2009,7 @@ if __name__ == "__main__":
           resolve_reddit_targets({"reddit_queries": [], "reddit_urls": []}), {})
 
     # ==========================================================================
-    # TEST 12 — resolve_g2_targets (Phase E)
+    # TEST 12 — resolve_g2_targets
     # ==========================================================================
     print("\n=== TEST 12: resolve_g2_targets ===")
     # Full G2 product URL passthrough
@@ -1605,7 +2028,7 @@ if __name__ == "__main__":
     check("G2: missing key -> empty", resolve_g2_targets({}), [])
 
     # ==========================================================================
-    # TEST 13 — resolve_capterra_targets (Phase E)
+    # TEST 13 — resolve_capterra_targets
     # ==========================================================================
     print("\n=== TEST 13: resolve_capterra_targets ===")
     check("CP: full product URL passthrough",

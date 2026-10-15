@@ -43,6 +43,65 @@ def _domain(url):
         return ""
 
 
+# The notice the keyword-ideas step leaves next to its output when what came back
+# was not what was asked for. search_intel reads it into the run's gap
+# list, which the closing lines and the unattended run's notification print.
+# It is a file of its own, never .run_notice.json: that one means "the scraper said
+# it is not working", and its reader words it that way.
+A1_ROWS_NOTICE = ".a1_rows_notice.json"
+
+
+def _write_a1_rows_notice(stage_dir, unreadable, region):
+    """Write <stage>/.a1_rows_notice.json when the step has something to say, and
+    remove a stale one otherwise (a --force re-run that was fine). The sentences
+    are made once, here, where the counts are known; search_intel only repeats them."""
+    p = Path(stage_dir) / A1_ROWS_NOTICE
+    if not unreadable and not region:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        return
+    doc = {}
+    if unreadable:
+        doc["unreadable"] = unreadable
+    if region:
+        doc["region"] = region
+    try:
+        p.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+    for text in (unreadable, region):
+        if text:
+            print(f"  \u26a0 Keyword ideas: {text}.")
+
+
+def _region_notice(asked, countries):
+    """The sentence for rows that name another country than the one asked for, or
+    None. asked: the region the call was sent with (stages._iso_country, uppercase).
+    countries: the `country` of each new-shape row that carries one. A row with no
+    country says nothing either way and is not counted. Counts are exact; the
+    country codes are the ones the rows carry, never turned into names."""
+    seen = [c for c in countries if c]
+    other = {}
+    for c in seen:
+        if c != asked:
+            other[c] = other.get(c, 0) + 1
+    if not other:
+        return None
+    n_other = sum(other.values())
+    if len(other) == 1:
+        named = next(iter(other))
+    else:
+        named = " and ".join(f"{c} ({k} row{'' if k == 1 else 's'})"
+                         for c, k in sorted(other.items()))
+    if n_other == len(seen):
+        return (f"you asked for {asked}, but all {len(seen)} keyword idea rows are for "
+                f"{named}, so these ideas are not for the market you asked for")
+    return (f"you asked for {asked}, but {n_other} of the {len(seen)} keyword idea rows that "
+            f"name a country are for {named}, not {asked}, so the list mixes markets")
+
+
 def _pp_a1(stage_dir, workdir, cfg):
     """Extract the keyword universe from A1's raw autocomplete run.
 
@@ -50,6 +109,10 @@ def _pp_a1(stage_dir, workdir, cfg):
     sorted by relevance descending. Deduplication is case-insensitive; seeds
     win over any matching suggestion. Final list is capped at
     cfg["keyword_cap"] (default 300).
+
+    Two things the step used to leave unsaid are now said: rows came
+    back but none could be read (the run goes on with the seeds, and says so), and
+    rows are marked for another country than the one asked for.
     """
     raw = _latest_run(stage_dir)
 
@@ -59,12 +122,33 @@ def _pp_a1(stage_dir, workdir, cfg):
     # Collect valid suggestion records, keeping their original position for
     # stable tie-breaking within equal relevance values.
     suggestions = []
+    countries = []  # `country` of each new-shape row that names one (region check)
     for i, rec in enumerate(raw):
         if not isinstance(rec, dict):
             continue
-        if rec.get("recordType") != "suggestion":
+        # Two row shapes are read, decided per row (never "accept everything"):
+        #   old, recorded runs of the withdrawn actor and the fixtures built from
+        #   them: recordType "suggestion", the text in `text`;
+        #   new, memo23/google-suggest-scraper: NO recordType, the
+        #   text in `suggestion` (the seed in `seedKeyword`, the rank in
+        #   `relevance`).
+        # WHY both: runs already saved in users' folders hold the old shape and
+        # are re-read by the app and by repeats. WHY a row is chosen by its own
+        # shape: the new rows carry no recordType, so the old test alone dropped
+        # every one of them and the step reported 0 keyword ideas while billing
+        # for them. A row that is neither shape is still dropped, as before.
+        #   A row that carries both (recordType "suggestion" AND a non-empty
+        #   `suggestion`, no `text`) is read as the new shape: the new field wins
+        #   whenever it is present and non-empty (the old test came first
+        #   and read the empty `text`, dropping the row). A row with only the old
+        #   fields is read exactly as before.
+        new_shape = isinstance(rec.get("suggestion"), str) and rec["suggestion"].strip()
+        if new_shape:
+            text = rec["suggestion"]
+        elif rec.get("recordType") == "suggestion":
+            text = rec.get("text", "")
+        else:
             continue
-        text = rec.get("text", "")
         if not isinstance(text, str):
             continue
         text = text.strip()
@@ -76,8 +160,32 @@ def _pp_a1(stage_dir, workdir, cfg):
         except (TypeError, ValueError):
             rel_val = 0
         suggestions.append((rel_val, i, text))
+        if new_shape:
+            # Only the new actor's rows say which market they are for; the old
+            # recorded rows carry a `country` that was never the market asked for.
+            countries.append(str(rec.get("country") or "").strip().upper())
 
     raw_count = len(suggestions)
+
+    # Rows came back and none could be read: the next steps would run on the seeds
+    # alone while the run reports nothing. Said plainly, with the count; the run goes
+    # on (the same as a volumes or results step that
+    # ran and returned nothing, which search_intel records as a gap).
+    unreadable = None
+    n_rows = len(raw) if isinstance(raw, list) else (1 if raw else 0)
+    if n_rows and not suggestions:
+        unreadable = (f"the scraper returned {n_rows} row{'' if n_rows == 1 else 's'}, but the "
+                      f"tool could not read any of them, so only your own seed terms are used "
+                      f"for the next steps")
+    region = None
+    if suggestions:
+        # The region the call was sent with, by the function build_A1 uses (UK -> GB).
+        # Not caught on purpose: a check that cannot run must fail loudly, not skip.
+        from stages import _iso_country
+        asked = _iso_country(cfg.get("country_code"))
+        if asked:
+            region = _region_notice(asked, countries)
+    _write_a1_rows_notice(stage_dir, unreadable, region)
 
     # Sort by relevance DESC; original index breaks ties (stable within same relevance).
     suggestions.sort(key=lambda t: (-t[0], t[1]))
@@ -113,9 +221,152 @@ def _pp_a1(stage_dir, workdir, cfg):
 
     cap_note = f" (capped at {cap})" if capped else ""
     print(
-        f"A1 postprocess: {raw_count} raw suggestions in, "
+        f"Keyword ideas postprocess: {raw_count} raw suggestions in, "
         f"{len(result)} unique keywords out{cap_note}."
     )
+
+
+def _drop_stale_outputs(base, rel_paths, label, what):
+    """Remove the derived files a step writes, and say so, when the step's latest
+    result gave nothing to write them from. One rule for every step that cleans its
+    raw result into a file of its own (generalised from _drop_stale_metrics; the convention is
+    one helper, not one per step).
+
+    base: the folder the paths are under (the run folder, or the step's folder).
+    rel_paths: this step's own derived files, relative to base. Never a raw
+        run_*.json: those are the step's result as it stands, and are not touched.
+    label: the step's function name, for the console line. what: the plain name of
+        what was removed ("keyword volumes", "search results").
+
+    WHY: each of those files is the step's cleaned copy of its raw result and
+    nothing else. When the step is run again in the same folder (--force, a resume)
+    and returns nothing or an error, the step has nothing to write, and an earlier
+    run's files would stay in place, looking like this run's. The report, the app
+    and the month comparison read them without asking which run wrote them. Removing
+    them keeps one rule true: a derived file is there only when it was written from
+    the step's result as it stands in this folder. A step that ran and found
+    nothing, honestly, still writes its own empty file (that is not this path), and a
+    step that is not run again keeps its files (this is only called by the step
+    itself, after a run)."""
+    removed = False
+    for rel in rel_paths:
+        p = Path(base) / rel
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            continue  # nothing left over: the usual case
+        except OSError as exc:
+            print(f"{label}: WARNING: could not remove the {what} an earlier run "
+                  f"left in this folder ({exc}); they may be old")
+            continue
+        removed = True
+    if removed:
+        print(f"{label}: removed the {what} an earlier run left in this folder, "
+              "so they cannot be mistaken for this run's")
+
+
+def _drop_stale_metrics(workdir):
+    """The volumes step's file. The Google search-results step picks its
+    keywords by the volumes in it (stages.serp_keywords), so an old file would make
+    it pull, and bill, for the "highest-volume" keywords of an older run, with no
+    note. With the file gone the step takes the keywords in list order and says so
+    (stages.serp_selection_note)."""
+    _drop_stale_outputs(workdir, ["metrics/keyword_metrics.json"], "_pp_a2",
+                        "keyword volumes")
+
+
+def _drop_stale_serp(workdir):
+    """The search-results step's two files: serp/rankings.json and
+    serp/domain_map.json. They are written together, so they go together. The report
+    facts, the app's index and the month comparison all read them, so old ones would
+    show an earlier run's rankings and competitors as this run's."""
+    _drop_stale_outputs(workdir, ["serp/rankings.json", "serp/domain_map.json"], "_pp_b1",
+                        "search results")
+
+
+# --- a Semrush row that carries no data --------------------
+# A paid run got "kanban board tools microsoft" back with cost per click, competition and
+# 12-month trend all empty and volume 0; the tool showed "0 searches" and counted it as
+# priced. Volume cannot tell "no data" from "nobody searches" (4 of the 6 real no-data
+# rows carry 0, 2 carry null), so the rule looks at the other three fields too. But a volume
+# above 0 is a measurement and always wins ("if we have data, it should
+# get saved, and only the zero data should be retried"): no data means NO volume (0 or
+# empty) AND the other three fields empty. In all 67 recorded real rows no row with a volume
+# above 0 has the three fields empty, so this changes no recorded answer.
+NO_DATA_FIELDS = ("cpc_usd", "competition", "volume_trend_12mo")
+
+
+def semrush_no_data(row):
+    """True when a Semrush keyword row carries no data: its volume is 0 or empty AND its cost per
+    click, competition and 12-month trend are all empty. A volume above 0 is measured, whatever
+    else is empty. ONE rule for every counter and every place a volume is shown. `row` is the
+    scraper's own record (all three fields present, null when empty) or a cleaned row, which
+    carries the answer as "no_data" (_pp_a2 works it out from the raw record, which has the
+    trend). An ABSENT field is not a null: a row lacking the three fields is not judged here."""
+    if not isinstance(row, dict):
+        return False
+    if row.get("volume") not in (None, 0):   # A real volume wins, before the
+        return False                         # cleaned row's own flag, which an old build may have got wrong
+    if "no_data" in row:
+        return row["no_data"] is True
+    return all(k in row and row[k] is None for k in NO_DATA_FIELDS)
+
+
+def judge_keyword_rows(rows, workdir):
+    """The cleaned rows of metrics/keyword_metrics.json, each judged by the one rule.
+
+    A folder made by an earlier version has cleaned rows with no "no_data" key, and a cleaned
+    row never
+    keeps the trend, so semrush_no_data cannot judge it from the row: it answers "measured" and a
+    report, the extractor and the search-results ranking showed "0" where the app (which also
+    reads the raw record) said "no data". The raw record (A2_keyword_metrics) always carries the
+    trend: in all 577 recorded Semrush rows (a real run and the recorded folders) the
+    key is present, null when empty. So the raw row is asked, by keyword, for every cleaned row
+    that does not already say. A real zero keeps its 0 (the raw row has a cost per click). With no
+    raw record to ask, a row is left exactly as it was: absent is not null. Every reader of the
+    cleaned file calls this, so every surface gives one answer."""
+    if not isinstance(rows, list):
+        return rows
+    open_rows = [r for r in rows if isinstance(r, dict) and "no_data" not in r]
+    if not open_rows:
+        return rows
+    try:
+        raw = _latest_run(Path(workdir) / "A2_keyword_metrics")
+    except (OSError, ValueError):
+        return rows
+    if not isinstance(raw, list):
+        return rows
+    by_kw = {rr["keyword"]: rr for rr in raw if isinstance(rr, dict) and rr.get("keyword")}
+    return [{**r, "no_data": True} if isinstance(r, dict) and "no_data" not in r
+            and semrush_no_data(by_kw.get(r.get("keyword"))) else r for r in rows]
+
+
+def is_empty_item(stage, item):
+    """True when `item` is one its step may ask for once more: a volumes row with no data,
+    or a search-results page marked "#error": true (UNEXERCISED: no real page has had it)."""
+    if stage == "A2":
+        return semrush_no_data(item)
+    return stage == "B1" and isinstance(item, dict) and item.get("#error") is True
+
+
+def item_key(stage, item):
+    """What the step was asked for to get this item (lowercase, trimmed); "" if it does not say."""
+    if not isinstance(item, dict):
+        return ""
+    sq = item.get("searchQuery")
+    v = item.get("keyword") if stage == "A2" else (sq.get("term") if isinstance(sq, dict) else None)
+    return str(v or "").strip().lower()
+
+
+def empty_item_keys(stage, items):
+    """The keys (first spelling kept) of a result's empty items, in order, without repeats."""
+    seen, out = set(), []
+    for it in items if isinstance(items, list) else []:
+        k = item_key(stage, it)
+        if k and k not in seen and is_empty_item(stage, it):
+            seen.add(k)
+            out.append(str(it["keyword"] if stage == "A2" else it["searchQuery"]["term"]))
+    return out
 
 
 def _pp_a2(stage_dir, workdir, cfg):  # noqa: ARG001 (cfg reserved for future cap/filter options)
@@ -137,12 +388,14 @@ def _pp_a2(stage_dir, workdir, cfg):  # noqa: ARG001 (cfg reserved for future ca
     if not isinstance(raw, list):
         print(
             f"_pp_a2: WARNING: actor returned a non-list payload "
-            f"({type(raw).__name__!r}); likely an error object — skipping"
+            f"({type(raw).__name__!r}); likely an error object, skipping"
         )
+        _drop_stale_metrics(workdir)
         return
 
     if not raw:
-        print("_pp_a2: no records found — skipping (stage may not have run yet)")
+        print("_pp_a2: no records found, skipping (the step may not have run yet)")
+        _drop_stale_metrics(workdir)
         return
 
     normalized = []
@@ -155,7 +408,7 @@ def _pp_a2(stage_dir, workdir, cfg):  # noqa: ARG001 (cfg reserved for future ca
         if not kw or not str(kw).strip():
             skipped += 1
             continue
-        normalized.append({
+        row = {
             "keyword":                  str(kw),
             "volume":                   rec.get("volume"),
             "cpc_usd":                  rec.get("cpc_usd"),
@@ -165,7 +418,12 @@ def _pp_a2(stage_dir, workdir, cfg):  # noqa: ARG001 (cfg reserved for future ca
             "organic_results_count":    rec.get("organic_results_count"),
             "source":                   "semrush",
             "database":                 rec.get("database"),
-        })
+        }
+        # Worked out from the raw record (it has the trend) and passed forward;
+        # the key exists only when True, so every other row is what it was.
+        if semrush_no_data(rec):
+            row["no_data"] = True
+        normalized.append(row)
 
     out_dir = Path(workdir) / "metrics"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -174,14 +432,17 @@ def _pp_a2(stage_dir, workdir, cfg):  # noqa: ARG001 (cfg reserved for future ca
         json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    populated = sum(1 for r in normalized if r["volume"] is not None)
-    null_count = len(normalized) - populated
+    # A no-data row is counted apart (with volume 0 it used to count as populated).
+    no_data = sum(1 for r in normalized if semrush_no_data(r))
+    populated = sum(1 for r in normalized if r["volume"] is not None and not semrush_no_data(r))
+    null_count = len(normalized) - populated - no_data
     skip_msg = (
         f"; {skipped} records skipped (non-dict or missing keyword)" if skipped else ""
     )
     print(
         f"_pp_a2: {len(raw)} records in -> {len(normalized)} metric rows out; "
-        f"{populated} populated, {null_count} no-data(null){skip_msg}"
+        f"{populated} populated, {no_data} no data from Semrush, {null_count} with no volume"
+        f"{skip_msg}"
     )
 
 
@@ -234,12 +495,14 @@ def _pp_b1(stage_dir, workdir, cfg):  # noqa: ARG001 (cfg reserved for future ca
     if not isinstance(raw, list):
         print(
             f"_pp_b1: WARNING: actor returned non-list ({type(raw).__name__!r}); "
-            "likely an error object — skipping"
+            "likely an error object, skipping"
         )
+        _drop_stale_serp(workdir)
         return
 
     if not raw:
-        print("_pp_b1: no records found — skipping (stage may not have run yet)")
+        print("_pp_b1: no records found, skipping (the step may not have run yet)")
+        _drop_stale_serp(workdir)
         return
 
     out_dir = Path(workdir) / "serp"
@@ -252,8 +515,13 @@ def _pp_b1(stage_dir, workdir, cfg):  # noqa: ARG001 (cfg reserved for future ca
     total_organic = 0  # count of type=="organic" items encountered
     total_skips = 0    # count skipped (empty displayedUrl OR invalid parsed domain)
 
+    error_pages = 0    # Pages the scraper marked as an error (kept out below)
     for rec in raw:
         if not isinstance(rec, dict):
+            continue
+        # A page marked "#error": true has no results; left in, it counted as covered.
+        if rec.get("#error") is True:
+            error_pages += 1
             continue
         sq = rec.get("searchQuery") or {}
         keyword = sq.get("term", "")
@@ -353,9 +621,235 @@ def _pp_b1(stage_dir, workdir, cfg):  # noqa: ARG001 (cfg reserved for future ca
     unique_domains = len(domain_appearances)
     num_keywords = len(rankings)
     print(
-        f"_pp_b1: {num_keywords} keywords, {total_organic} organic results parsed, "
-        f"{unique_domains} unique domains; {total_skips} results skipped (empty or non-URL displayedUrl, e.g. social/video panels)"
+        # The count that is KEPT leads. The old line said "25 organic results
+        # parsed ... 2 results skipped" while 23 were kept, so a reader took 25 for the
+        # number in the files. Every organic item is either kept or skipped.
+        f"_pp_b1: {num_keywords} keywords, {total_organic - total_skips} organic results kept "
+        f"({total_organic} found, {total_skips} skipped as empty or non-URL displayedUrl, "
+        f"e.g. social/video panels), {unique_domains} unique domains"
+        + (f"; {error_pages} error page{'' if error_pages == 1 else 's'} left out" if error_pages else "")
     )
+
+
+# --- the steps of a run that did not finish ----------------------
+# The same block, word for word, in the postprocess.py of all three tools (a test
+# pins that): it reads the records run_phase already wrote and nothing else.
+
+_ENDED_HOW = {"ABORTED": "was stopped", "FAILED": "failed",
+              "TIMED-OUT": "ran out of time", "TIMED_OUT": "ran out of time"}
+
+
+def _record_of(path):
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def only_error_items(items):
+    """A sentence for a step whose dataset is nothing but error items, else None.
+    Apify reports a failed request as an item {"#error": true,
+    "#debug": {"errorMessage": ...}} inside the dataset; a good item carries
+    "#error": false (recorded search results do). Such a dataset is a failed step, never
+    an empty answer. A dataset with some good items among the error items is not this
+    (it is treated as the results it holds)."""
+    if not isinstance(items, list) or not items:
+        return None
+    if not all(isinstance(i, dict) and i.get("#error") is True for i in items):
+        return None
+    dbg = items[0].get("#debug")
+    why = dbg.get("errorMessage") if isinstance(dbg, dict) else None
+    why = f" ({str(why).strip()[:150]})" if why and str(why).strip() else ""
+    return f"the scraper returned only an error and no results{why}"
+
+
+def unfinished_steps(workdir):
+    """The steps of this run that did not finish, each as one plain sentence:
+    [{"step": <name>, "sentence": <text>}] in step order, [] when every step that ran
+    finished.
+
+    WHY: a step that failed, was stopped by the budget cap, or whose scraper run did
+    not finish left no results, and everything downstream (the index, the written
+    report's facts, the app, the month comparison) then read that as "found nothing".
+    run_phase already records each such step next to its output
+    (.run_incomplete.json, .run_notice.json); the closing lines of the entry script
+    name them. This reads the same records once, so that every other place repeats one
+    sentence and none of them works it out again. An honest empty result (the step ran
+    and found nothing) has no record and is not listed; a step the settings leave out
+    is not listed either (the closing lines say that).
+
+    The sentence for a failed or budget-stopped step also says that any results shown
+    for it are an earlier run's, when the folder still holds a finished result file for
+    it: the failed step wrote none of its own. A step whose record says it saved its
+    result before it stopped (result_saved) is the exception: the result in
+    the folder is this run's, and the sentence says it may be incomplete.
+
+    A step a later run skipped carries the record kind
+    "kept_after_failed_attempt" (run_phase._note_kept_after_failed_attempt). It is not
+    an unfinished step: its finished result is in the folder, and the sentence says
+    the latest attempt to fetch it again failed. It is listed under "kept_step", not
+    "step": the month comparison takes "step" to mean records may be missing."""
+    import stages as _stages
+    out = []
+    for key, spec in _stages.STAGES.items():
+        d = Path(workdir) / spec["folder"]
+        name = spec.get("name") or key
+        inc = _record_of(d / ".run_incomplete.json") or {}
+        by_kind = {}
+        for e in inc.get("entries") or []:
+            if isinstance(e, dict):
+                by_kind.setdefault(e.get("kind"), e)
+        earlier = (" Any results shown for this step are from an earlier run."
+                   if (d / "run_02_full.json").exists() else "")
+        missing = " That is not the same as finding nothing."
+        k = by_kind.get("kept_after_failed_attempt")
+        if k:
+            if k.get("result_saved"):
+                s = (f"{name}: the latest attempt to fetch it again saved its results and "
+                     f"then stopped with an error, so what is shown for it comes from that "
+                     f"attempt and may be incomplete.")
+            else:
+                why = ("stopped with an error" if k.get("was") != "budget_stop" else
+                       "started, but the run reached the budget cap in your settings "
+                       "part-way through it and nothing it collected was kept"
+                       if k.get("part_way") else
+                       "did not run, because the run reached the budget cap in your settings")
+                s = (f"{name}: the latest attempt to fetch it again {why}, so the results "
+                     f"shown for it were kept from an earlier fetch.")
+            out.append({"kept_step": name, "sentence": s})
+            continue
+        if (by_kind.get("step_failed") or {}).get("result_saved"):
+            s = (f"{name} stopped with an error after it had saved this run's results, "
+                 f"so what is shown for it comes from this run but may be incomplete.")
+        elif "step_failed" in by_kind:
+            s = (f"{name} stopped with an error before it finished, so its results "
+                 f"are missing from this run.{missing}{earlier}")
+        elif "budget_stop" in by_kind:
+            if by_kind["budget_stop"].get("part_way"):
+                s = (f"{name} started, but the run reached the budget cap in your "
+                     f"settings part-way through it, and nothing it collected was "
+                     f"kept, so its results are missing from this run.{missing}{earlier}")
+            else:
+                s = (f"{name} did not run, because the run reached the budget cap in "
+                     f"your settings, so its results are missing from this "
+                     f"run.{missing}{earlier}")
+        elif "run_ended" in by_kind:
+            e = by_kind["run_ended"]
+            how = _ENDED_HOW.get(str(e.get("status")), "did not finish")
+            s = (f"{name}: the scraper run {how} before it finished, so what it "
+                 f"collected is partial.{missing}" if e.get("records")
+                 else f"{name}: the scraper run {how} before it finished and "
+                      f"collected nothing, so its results are missing from this "
+                      f"run.{missing}")
+        elif _record_of(d / ".run_notice.json"):
+            s = (f"{name}: the scraper reported that it did not work, so its "
+                 f"results are missing from this run.{missing}")
+        else:
+            continue
+        out.append({"step": name, "sentence": s})
+    return out
+
+
+def drop_stage_outputs(stage, stage_dir, workdir):  # noqa: ARG001 (same signature in all three tools)
+    """Remove the files an earlier run's step left behind, for a step that ended
+    without a result in this run (run_phase calls it where a step is not
+    run, fails, or is stopped, and only when this run would have run it again). The
+    step's raw run files are its result as it stands and are never touched.
+
+    The volumes step's file is read by the search-results step to pick its keywords,
+    and the search-results step's two files are read by the report, the app and the
+    month comparison: an old one would be shown as this run's. The keyword ideas step
+    keeps its list: later steps fall back on the seed terms only when it is missing,
+    and a list is not shown as a finding."""
+    if stage == "A2":
+        _drop_stale_metrics(workdir)
+    elif stage == "B1":
+        _drop_stale_serp(workdir)
+
+
+_REBUILT = {"A2": (["metrics/keyword_metrics.json"], "keyword volumes"),
+            "B1": (["serp/rankings.json", "serp/domain_map.json"], "search results")}
+
+
+def _retry_stale(stage_dir, clear=False):
+    """True when run_phase left "stale_files" in the retry record: a kill while the second
+    request's answers were being saved, so the files may be behind the result.
+    clear=True removes the mark (the files were just built from the result)."""
+    p = Path(stage_dir) / ".empty_retry.json"
+    doc = _record_of(p) or {}
+    if clear and doc.pop("stale_files", None):
+        try:
+            tmp = p.with_name(p.name + ".tmp")
+            tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(p)
+        except OSError:
+            pass
+    return doc.get("stale_files") is True
+
+
+def _rebuild_gate(stage, stage_dir, workdir):
+    """(files, plain name) when the step's files are missing and its record says its
+    latest attempt failed or was stopped (a record a later run re-labelled counts), or when a
+    second request left the files behind its answers, else None."""
+    own = _REBUILT.get(stage)
+    if own and _retry_stale(stage_dir):
+        return own
+    if not own or all((Path(workdir) / r).exists() for r in own[0]):
+        return None
+    entries = (_record_of(Path(stage_dir) / ".run_incomplete.json") or {}).get("entries")
+    if not any(isinstance(e, dict) and e.get("kind") in
+               ("step_failed", "budget_stop", "kept_after_failed_attempt")
+               for e in entries or []):
+        return None
+    return own
+
+
+def _holds_result_to_build_from(stage_dir):
+    """True when the kept result is not nothing and not nothing but errors."""
+    kept = _latest_run(stage_dir)
+    return isinstance(kept, list) and bool(kept) and not only_error_items(kept)
+
+
+def will_rebuild_dropped_outputs(stage, stage_dir, workdir):
+    """True when rebuild_dropped_outputs would build this step's files again: the same
+    test, not a second one. The search closing promises the rebuild
+    "at no charge" only when this is True; before, it promised it for every kept
+    result, including one of nothing and a step that has no files to build."""
+    if not _rebuild_gate(stage, stage_dir, workdir):
+        return False
+    try:
+        return _holds_result_to_build_from(stage_dir)
+    except Exception:  # noqa: BLE001 - the rebuild would report it and build nothing
+        return False
+
+
+def rebuild_dropped_outputs(stage, stage_dir, workdir, cfg):
+    """Build again the files drop_stage_outputs took out of a finished step, from the
+    result the folder kept. Called by run_phase for a step it skips
+    as already complete; it spends nothing.
+
+    WHY: a --force run of the step that failed or hit the budget cap removed the step's
+    files and kept its earlier result (run_02_full.json). A plain run of the folder then
+    skipped the step, as the closing lines said it would, and nothing built the files
+    again: the app, the report facts and the comparison showed no rankings for a step
+    whose result was right there. Only a step with a record of that failed or stopped
+    attempt is rebuilt: a step the settings leave out, or one with no inputs yet, was
+    emptied on purpose and has no record, and stays as it is. A kept result of nothing, or
+    of nothing but errors, has nothing to build from."""
+    own = _rebuild_gate(stage, stage_dir, workdir)
+    if not own:
+        return
+    try:
+        if not _holds_result_to_build_from(stage_dir):
+            return
+        postprocess(stage, stage_dir, workdir, cfg)
+    except Exception as exc:  # noqa: BLE001
+        print(f"   could not build the {own[1]} again from the result this folder kept "
+              f"({exc}); they stay missing")
+        return
+    _retry_stale(stage_dir, clear=True)
+    print(f"   built the {own[1]} again from the result this folder kept; nothing was charged")
 
 
 def postprocess(stage, stage_dir, workdir, cfg):

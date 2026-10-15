@@ -34,6 +34,7 @@ Stdlib only -- no pip install needed.
 
 import datetime
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -153,11 +154,11 @@ def _looks_like_report(text: str) -> tuple:
     """
     t = (text or "").strip()
     if not t:
-        return False, "empty"
+        return False, "nothing came back"
     if "claude.ai/code/artifact" in t.lower() or "/code/artifact/" in t.lower():
-        return False, "contains an artifact URL (subagent took an action instead of returning the report)"
+        return False, "Claude did something else instead of writing the report"
     if not t.startswith("#"):
-        return False, "does not start with a markdown heading"
+        return False, "the text that came back was not a report"
     return True, "ok"
 
 
@@ -416,7 +417,7 @@ def build_e1_prompt(facts: dict, cfg: dict, template_text: str) -> str:
         "### Meta",
         meta_block,
         "",
-        "### Pain phrases (ranked by distinctiveness in low-star reviews)",
+        "### Pain phrases (most-mentioned in low-star reviews; filler and shared topic/brand words removed)",
         pain_block,
         "",
         f"## Customer quotes -- reference these by ID (for example [[Q3]])  (N={low_n})",
@@ -500,7 +501,7 @@ def build_e2_prompt(facts: dict, cfg: dict, template_text: str) -> str:
         "### Meta",
         meta_block,
         "",
-        "### Trust phrases (ranked by distinctiveness in high-star reviews)",
+        "### Trust phrases (most-mentioned in high-star reviews; filler and shared topic/brand words removed)",
         trust_block,
         "",
         f"## Customer quotes -- reference these by ID (for example [[Q3]])  (N={high_n})",
@@ -517,6 +518,150 @@ def build_e2_prompt(facts: dict, cfg: dict, template_text: str) -> str:
 # ---------------------------------------------------------------------------
 # CLI subprocess -- mirrors the companion tool's OCR call pattern (FROZEN)
 # ---------------------------------------------------------------------------
+
+# Why a report was not written, kept for the run's closing lines.
+# WHY: `_run_claude` returns "" for every kind of failure, so the entry script could
+# only say "not generated" and the closing lines said nothing at all. The reason is
+# recorded here, in plain words, when the step gives up; the entry script reads it
+# with failure_reason(). generate() clears it first, so a reason never outlives the
+# run that produced it. (Same code as the search tool's report.py; each skill keeps
+# its own copy because a skill must work installed on its own.)
+_FAIL_TAIL_CHARS = 200
+_failures: dict = {}
+
+
+# What a CLI message may NOT carry into the closing lines. The tail of the `claude` command's
+# message is relayed to the user
+# word for word, and lands in the run's status file, which a user may paste into a
+# chat or a ticket. Raw, it can hold terminal colour codes and control characters,
+# the user's home folder (their account name) and key-shaped strings. All three are
+# removed BEFORE the tail is cut: cutting first could leave half a key visible.
+#   * ANSI escapes: CSI (colours, cursor), OSC (titles, ended by BEL or ESC \), and
+#     the two-character escapes. Then every remaining control character (C0, DEL
+#     and C1) becomes a space, and whitespace collapses to one space.
+#   * The home folder: this account's own home, then any /Users/<name>, /home/<name>
+#     or C:\Users\<name> (the message may come from another account's path, or the
+#     tool may run as a different user than the one whose path is quoted). A name may
+#     hold spaces, up to eight words (four words leaked the
+#     tail of the name); a name longer than that still leaks its tail, the bound
+#     keeps ordinary words that sit before a slash from being swallowed.
+#   * Secrets, replaced by [hidden]: `sk-` keys, `apify_api_` tokens, a JWT (three
+#     dot-separated parts, the first starting `eyJ`), the value of a `token=`, `key=`,
+#     `secret=`, `password=` or `auth=` setting or query parameter when it is 16 or
+#     more characters (the name is kept), and any run of 32 or more base64, base64url
+#     or hex characters that holds a digit (a real key or hash always does; a long
+#     word or path without a digit stays readable). A long run of the form NAME=VALUE
+#     keeps its NAME and hides the VALUE. Long ids that hold a digit are hidden too:
+#     a disclosed, accepted trade-off.
+#   * A key split by a line break: a terminal wraps a long key
+#     onto two lines, and turning the break into a space first left the second half
+#     shown. A control character or line break that sits BETWEEN TWO CHARACTERS OF A
+#     TOKEN is turned into _JOIN, which the secret patterns treat as a token character,
+#     so the key is whole when it is matched and whole when it is hidden. Any _JOIN
+#     that is not inside a secret becomes a space again, so ordinary words on two
+#     lines stay two words. The length tests count the real characters only. The join
+#     is made only when what follows the break looks like key material: it holds a
+#     digit (a real key always does, the same test the long-run rule uses) or it runs
+#     12 or more token characters. WHY: a key that ends a line is usually followed by
+#     ordinary words ("invalid key sk-... / Please run /login"), and a plain word is
+#     not part of the key. The cost, disclosed: a key cut by a break so that its last
+#     piece is a digit-free fragment of 11 characters or fewer keeps that piece shown.
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-Z\\-_]")
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_JOIN = "\ue000"
+_TOKEN_EDGE_RE = re.compile(
+    r"(?<=[A-Za-z0-9+/=_.-])[\x00-\x1f\x7f-\x9f]+"
+    r"(?=[A-Za-z0-9+/=_.-]*\d|[A-Za-z0-9+/=_.-]{12})")
+_HOME_RE = re.compile(
+    r"(?:(?:/Users|/home)/|[A-Za-z]:[\\/]Users[\\/])"
+    r"(?:[^\\/\s:;,'\"()<>]+(?: [^\\/\s:;,'\"()<>]+){0,7}(?=[\\/])|[^\\/\s:;,'\"()<>]+)")
+
+
+def _hide_if_real_length(n):
+    """A replacement function: [hidden] when the match holds at least n real
+    characters (the _JOIN marks do not count), else the match as it was."""
+    def sub(m):
+        return "[hidden]" if len(m.group(0).replace(_JOIN, "")) >= n else m.group(0)
+    return sub
+
+
+def _hide_assigned_value(m):
+    """NAME=VALUE where the name says secret: keep the name, hide the value (16 or
+    more real characters)."""
+    if len(m.group(2).replace(_JOIN, "")) < 16:
+        return m.group(0)
+    return m.group(1) + "[hidden]"
+
+
+def _hide_long_run(m):
+    """A run of 32 or more token characters with a digit. NAME=VALUE keeps its NAME
+    and hides the VALUE; a base64 run that only ends in padding (`==`) is hidden whole."""
+    s = m.group(0)
+    if len(s.replace(_JOIN, "")) < 32:
+        return s
+    named = re.match(r"([A-Za-z_][A-Za-z0-9_" + _JOIN + r"-]{0,63}=)(.*)$", s, re.S)
+    if named and named.group(2).strip("="):
+        return named.group(1) + "[hidden]"
+    return "[hidden]"
+
+
+_SECRET_RULES = (
+    (re.compile("(?<![A-Za-z0-9" + _JOIN + "])sk-[A-Za-z0-9_" + _JOIN + "-]{8,}"),
+     _hide_if_real_length(11)),
+    (re.compile("apify_api_[A-Za-z0-9_" + _JOIN + "-]{6,}"), _hide_if_real_length(16)),
+    (re.compile("(?<![A-Za-z0-9_" + _JOIN + "-])eyJ[A-Za-z0-9_" + _JOIN + "-]+\\.[A-Za-z0-9_"
+                + _JOIN + "-]+\\.[A-Za-z0-9_" + _JOIN + "-]*"), _hide_if_real_length(0)),
+    (re.compile("(?i)((?<![A-Za-z0-9_." + _JOIN + "-])[A-Za-z0-9_." + _JOIN + "-]{0,40}?"
+                "(?:token|key|secret|passw(?:or)?d|pwd|auth|credential|signature)"
+                "[A-Za-z0-9_." + _JOIN + "-]{0,40}=[\"']?)([A-Za-z0-9+/=_.~%" + _JOIN + "-]{16,})"),
+     _hide_assigned_value),
+    (re.compile("(?<![A-Za-z0-9+/=_" + _JOIN + "-])(?=[A-Za-z0-9+/=_" + _JOIN + "-]*\\d)"
+                "[A-Za-z0-9+/=_" + _JOIN + "-]{32,}"), _hide_long_run),
+)
+
+
+def _clean_cli_text(text) -> str:
+    """A CLI message made safe to show: no escapes or control characters, the home
+    folder as ~, secrets as [hidden], one line. See the note above _ANSI_RE."""
+    t = _ANSI_RE.sub("", str(text or "")).replace(_JOIN, " ")
+    t = _TOKEN_EDGE_RE.sub(_JOIN, t)
+    t = _CONTROL_RE.sub(" ", t)
+    home = os.path.expanduser("~")
+    if len(home) > 1 and home not in ("/", "~"):
+        t = t.replace(home, "~")
+    t = _HOME_RE.sub("~", t)
+    for rx, fn in _SECRET_RULES:
+        t = rx.sub(fn, t)
+    return " ".join(t.replace(_JOIN, " ").split())
+
+
+def _short_tail(text) -> str:
+    """The last _FAIL_TAIL_CHARS characters of a CLI message, on one line, cleaned.
+
+    WHY the tail: a CLI error ends with what went wrong ("Not logged in"), and
+    an unexpected banner comes first. WHY cut at all: the message is relayed to the
+    user word for word, so it stays short. WHY cleaned first: see _clean_cli_text.
+    Dashes are plain hyphens (copy rule)."""
+    t = _clean_cli_text(text).replace("\u2014", "-").replace("\u2013", "-")
+    return t if len(t) <= _FAIL_TAIL_CHARS else "..." + t[-_FAIL_TAIL_CHARS:]
+
+
+def _cli_message(result) -> str:
+    """What a failed `claude` call said: its stderr, or its stdout when stderr is
+    empty (`claude --print` can put its error on stdout, for example when it is
+    not logged in), cut to a short tail."""
+    return _short_tail((result.stderr or "").strip() or (result.stdout or "").strip())
+
+
+def failure_reason(*labels) -> str:
+    """The plain reason a report was not written, or "" when none was recorded.
+    With labels, the first of those reports that failed; without, any."""
+    keys = labels or tuple(_failures)
+    for k in keys:
+        if _failures.get(k):
+            return _failures[k]
+    return ""
+
 
 def _run_claude(prompt: str, model: str, label: str, max_attempts: int = 2) -> str:
     """Invoke the claude CLI with prompt via stdin; return the report text.
@@ -571,6 +716,7 @@ def _run_claude(prompt: str, model: str, label: str, max_attempts: int = 2) -> s
     ]
 
     last_reason = "no attempt made"
+    last_plain = "the Claude Code command-line tool was not run"
     for attempt in range(1, max_attempts + 1):
         try:
             result = subprocess.run(
@@ -581,23 +727,29 @@ def _run_claude(prompt: str, model: str, label: str, max_attempts: int = 2) -> s
             )
         except FileNotFoundError:
             # Not retryable: the binary is absent.
-            print(f"[report] `claude` CLI not found -- {label} not generated.")
+            print(f"[report] `claude` CLI not found, so {label} is not generated.")
+            _failures[label] = ("the Claude Code command-line tool (claude) was not "
+                                "found on this computer")
             return ""
         except Exception as exc:  # noqa: BLE001
             last_reason = f"unexpected error: {exc}"
+            last_plain = (f"the Claude Code command-line tool could not be run "
+                          f"({_short_tail(exc)})")
             print(f"[report] {label}: {last_reason} (attempt {attempt}/{max_attempts})")
             continue
 
         if result.returncode != 0:
-            stderr_snippet = (result.stderr or "").strip()[:200]
-            last_reason = f"non-zero exit ({result.returncode})" + (
-                f": {stderr_snippet}" if stderr_snippet else "")
+            said = _cli_message(result)
+            last_reason = f"non-zero exit ({result.returncode})" + (f": {said}" if said else "")
+            last_plain = (f"the Claude Code command-line tool failed (exit {result.returncode})"
+                          + (f": {said}" if said else ""))
             print(f"[report] {label}: {last_reason} (attempt {attempt}/{max_attempts})")
             continue
 
         text = (result.stdout or "").strip()
         if not text:
             last_reason = "empty output"
+            last_plain = "the Claude Code command-line tool returned no text"
             print(f"[report] {label}: {last_reason} (attempt {attempt}/{max_attempts})")
             continue
 
@@ -610,16 +762,20 @@ def _run_claude(prompt: str, model: str, label: str, max_attempts: int = 2) -> s
 
         ok, reason = _looks_like_report(cleaned)
         if ok:
+            _failures.pop(label, None)
             return cleaned
         last_reason = reason
+        last_plain = (f"the Claude Code command-line tool answered, but it did not "
+                      f"give a usable report: {_short_tail(reason)}")
         print(
             f"[report] {label}: output failed report validation ({reason}); "
             f"attempt {attempt}/{max_attempts}"
-            + (" -- retrying" if attempt < max_attempts else "")
+            + ("; retrying" if attempt < max_attempts else "")
         )
 
     print(f"[report] {label}: no valid report after {max_attempts} attempts "
-          f"({last_reason}) -- not generated.")
+          f"({last_reason}), not generated.")
+    _failures[label] = last_plain
     return ""
 
 
@@ -628,6 +784,31 @@ def _run_claude(prompt: str, model: str, label: str, max_attempts: int = 2) -> s
 # ---------------------------------------------------------------------------
 
 _NEUTRAL_MIN_ITEMS = 3   # fewer than this: just stored for rigour, no section
+_TOPICS_REPORT = "E3_reddit_topics.md"
+
+
+def _drop_old_topics_report(workdir):
+    """Remove the Reddit topics report an earlier run wrote, and say so, when this run
+    has nothing to write one from (the same rule and the same one console
+    line as postprocess._drop_stale_outputs, which is also used for the Reddit set-aside file
+    itself).
+
+    WHY: the report is written from reddit_neutral.json and from nothing else. When a
+    re-run in the same folder brings no neutral items (the file is removed then), or
+    too few, the earlier run's report would stay in the folder looking like this run's:
+    the app and the user's own reading would show last time's discussion topics as this
+    time's. A fixed path, never a search: only the file this function itself writes."""
+    p = Path(workdir) / _TOPICS_REPORT
+    try:
+        p.unlink()
+    except FileNotFoundError:
+        return  # nothing left over: the usual case
+    except OSError as exc:
+        print(f"   report: WARNING: could not remove the Reddit topics report an earlier "
+              f"run left in this folder ({exc}); it may be old")
+        return
+    print("   report: removed the Reddit topics report an earlier run left in this "
+          "folder, so it cannot be mistaken for this run's")
 
 
 def _neutral_topics_report(workdir, cfg, model):
@@ -647,13 +828,16 @@ def _neutral_topics_report(workdir, cfg, model):
     workdir = Path(workdir)
     neutral_path = workdir / "reddit_reviews" / "reddit_neutral.json"
     if not neutral_path.exists():
+        _drop_old_topics_report(workdir)
         return None
     try:
         items = json.loads(neutral_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
+        _drop_old_topics_report(workdir)
         return None
     items = [r for r in items if isinstance(r, dict) and (r.get("text") or "").strip()]
     if len(items) < _NEUTRAL_MIN_ITEMS:
+        _drop_old_topics_report(workdir)
         return None
 
     # Deterministic: the questions people asked (verbatim, deduped, capped).
@@ -668,7 +852,7 @@ def _neutral_topics_report(workdir, cfg, model):
 
     n = len(items)
     lines = [
-        "# E3 - General discussion & questions (Reddit)",
+        "# General discussion and questions (Reddit)",
         "",
         f"_Generated from {n} Reddit items that the sentiment banding judged "
         "NEITHER a complaint NOR praise. This is general discussion, not pain or "
@@ -692,7 +876,8 @@ def _neutral_topics_report(workdir, cfg, model):
             "below. No em-dashes, no AI-cliche filler.\n\n"
             f"Items:\n{sample}\n"
         )
-        theme_md = _run_claude(theme_prompt, model, "E3_themes", max_attempts=2)
+        theme_md = _run_claude(theme_prompt, model, "the Reddit discussion themes",
+                               max_attempts=2)
 
     if theme_md:
         lines += [theme_md.strip(), ""]
@@ -707,7 +892,7 @@ def _neutral_topics_report(workdir, cfg, model):
         lines += ["_No distinct questions or themes surfaced from this neutral set; "
                   "it is retained in reddit_neutral.json for transparency._", ""]
 
-    out_path = workdir / "E3_reddit_topics.md"
+    out_path = workdir / _TOPICS_REPORT
     out_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"   report -> E3_reddit_topics.md  ({n} neutral items, "
           f"{len(questions)} questions{', themes' if theme_md else ''})")
@@ -734,19 +919,28 @@ def generate(workdir, cfg) -> dict:
     independently and its output is on disk regardless.
     """
     workdir = Path(workdir)
+    _failures.clear()
 
     if not shutil.which("claude"):
         print(
-            "[report] claude CLI not found -- E1/E2 not generated; "
+            "[report] claude CLI not found, so the pain-points and trust-signals reports "
+            "were not generated; "
             "run with any CLI LLM available"
         )
+        for _lbl in ("the pain-points report", "the trust-signals report"):
+            _failures[_lbl] = ("the Claude Code command-line tool (claude) was not "
+                               "found on this computer")
         return {"E1": None, "E2": None}
 
     resolved_model = (cfg.get("report_model") or "").strip() or _DEFAULT_MODEL
 
     facts_path = workdir / "synthesis_facts.json"
     if not facts_path.exists():
-        print(f"[report] synthesis_facts.json not found at {facts_path} -- skipping")
+        print("[report] the analysis the pain-points and trust-signals reports are written "
+              "from was not found in this folder, so the reports are skipped")
+        for _lbl in ("the pain-points report", "the trust-signals report"):
+            _failures[_lbl] = ("the analysis the report is written from "
+                               "was not found")
         return {"E1": None, "E2": None}
 
     facts = json.loads(facts_path.read_text(encoding="utf-8"))
@@ -771,7 +965,7 @@ def generate(workdir, cfg) -> dict:
     e1_path = None
     e1_audit: dict = {}
     print("   report: generating E1_pain_points.md ...")
-    e1_text = _run_claude(e1_prompt, resolved_model, "E1_pain_points")
+    e1_text = _run_claude(e1_prompt, resolved_model, "the pain-points report")
     if e1_text:
         low_bank = facts.get("low_star_quotes", [])
         # Measure bypass rate on the RAW output (before substitution)
@@ -779,7 +973,7 @@ def generate(workdir, cfg) -> dict:
         # Paste [[Q<n>]] refs -- verbatim by construction, so provenance passes
         e1_text, n_pasted_e1, n_bad_e1 = quote_tool.paste_refs(e1_text, low_bank)
         print(
-            f"[report] E1 quotes: {n_pasted_e1} pasted via [[Q]] ref, "
+            f"[report] pain-points report quotes: {n_pasted_e1} pasted via [[Q]] ref, "
             f"{n_inline_e1} typed inline (bypassed the tool), "
             f"{n_bad_e1} bad refs"
         )
@@ -789,7 +983,7 @@ def generate(workdir, cfg) -> dict:
         e1_note = _provenance_note(e1_text, low_bank)
         if e1_note:
             n_unmatched = sum(1 for line in e1_note.splitlines() if line.startswith('- "'))
-            print(f"[report] provenance: {n_unmatched} E1 quote(s) unmatched -- disclosure appended")
+            print(f"[report] provenance: {n_unmatched} pain-points quote(s) unmatched, disclosure appended")
             e1_text = e1_text + e1_note
         e1_out = workdir / "E1_pain_points.md"
         e1_out.write_text(e1_text, encoding="utf-8")
@@ -800,7 +994,7 @@ def generate(workdir, cfg) -> dict:
     e2_path = None
     e2_audit: dict = {}
     print("   report: generating E2_trust_signals.md ...")
-    e2_text = _run_claude(e2_prompt, resolved_model, "E2_trust_signals")
+    e2_text = _run_claude(e2_prompt, resolved_model, "the trust-signals report")
     if e2_text:
         high_bank = facts.get("high_star_quotes", [])
         # Measure bypass rate on the RAW output (before substitution)
@@ -808,7 +1002,7 @@ def generate(workdir, cfg) -> dict:
         # Paste [[Q<n>]] refs -- verbatim by construction, so provenance passes
         e2_text, n_pasted_e2, n_bad_e2 = quote_tool.paste_refs(e2_text, high_bank)
         print(
-            f"[report] E2 quotes: {n_pasted_e2} pasted via [[Q]] ref, "
+            f"[report] trust-signals report quotes: {n_pasted_e2} pasted via [[Q]] ref, "
             f"{n_inline_e2} typed inline (bypassed the tool), "
             f"{n_bad_e2} bad refs"
         )
@@ -817,7 +1011,7 @@ def generate(workdir, cfg) -> dict:
         e2_note = _provenance_note(e2_text, high_bank)
         if e2_note:
             n_unmatched = sum(1 for line in e2_note.splitlines() if line.startswith('- "'))
-            print(f"[report] provenance: {n_unmatched} E2 quote(s) unmatched -- disclosure appended")
+            print(f"[report] provenance: {n_unmatched} trust-signals quote(s) unmatched, disclosure appended")
             e2_text = e2_text + e2_note
         e2_out = workdir / "E2_trust_signals.md"
         e2_out.write_text(e2_text, encoding="utf-8")
@@ -848,6 +1042,12 @@ def generate(workdir, cfg) -> dict:
     if "reddit" in (cfg.get("sources") or []):
         e3_path = _neutral_topics_report(workdir, cfg, resolved_model)
 
+    # What the automated check found goes at the top of each report
+    # this call wrote, last, so the folder line names every report file written.
+    for _p in (e1_path, e2_path):
+        if _p is not None:
+            stamp_check_block(workdir, _p.name)
+
     return {"E1": e1_path, "E2": e2_path, "E3": e3_path}
 
 
@@ -860,3 +1060,227 @@ def generate(workdir, cfg) -> dict:
 #   Pattern mirrors subjects.py and extractor.py exactly.
 #
 # PART B: One real end-to-end LLM run (requires `claude` CLI in PATH).
+
+
+# ---------------------------------------------------------------------------
+# What the automated quote check found, written where the code owns the words
+# ---------------------------------------------------------------------------
+# WHY: the check's findings used to reach the user only through
+# Claude's reply. Four rounds of SKILL wording asked Claude to pass them on
+# "exactly as printed", and every live session lost something: the folder and
+# file names, a "tidied" line, once "treat as unverified" softened into
+# something reassuring. So the findings are now written by code onto the two
+# surfaces the user reads directly: the top of each checked report file
+# (stamp_check_block) and the local app (the viewer reads `check --json`).
+# A reply that paraphrases can no longer lose them, because they are in the file.
+#
+# One wording, one count: every line comes from check_data / _file_line, and
+# the count is the one the check wrote into the file's own end note
+# (_provenance_note); nothing is recounted. A report written by an earlier version
+# has no top block; its findings are read from the same end note.
+
+_NOTE_HEADING = "Provenance note (automated check)"
+_NOTE_COUNT_RE = re.compile(r"(\d+) quoted passage\(s\) below could not be matched")
+_REPORT_FILES = ("E1_pain_points.md", "E2_trust_signals.md")
+# Every report file the report step can write, in the order it writes them.
+# E3 is written only when Reddit is a source; its topics are not quote-checked.
+_ALL_REPORT_FILES = _REPORT_FILES + ("E3_reddit_topics.md",)
+# The heading of the block stamp_check_block puts at the top of a checked report.
+TOP_HEADING = "## What the automated check found"
+
+
+# The folder is named the way the user knows it, never a machine path, in one
+# of two wordings.  A run folder directly in a research repository (see
+# _in_research_repository) is "the folder pain_acme-fitness_2026-01-01 in your
+# research repository", because the repository's own folder has another name
+# on each machine.  Any other run folder is "marketing-research/
+# pain_acme-fitness_2026-01-01": the research folder's name and the run folder's
+# name. os.path.abspath is lexical, so a folder reached through a link keeps
+# the name the user gave it.
+def _short_folder(workdir) -> str:
+    p = Path(os.path.abspath(str(workdir)))
+    if _in_research_repository(p):
+        return f"the folder {p.name} in your research repository"
+    return f"{p.parent.name}/{p.name}" if p.parent.name else p.name
+
+
+# A run folder directly in a research repository is named without the
+# repository's own folder.  WHY: that name differs between machines.  A cloud
+# month is written on the cloud machine, whose clone is named after the
+# repository ("research-repo/pain_acme-fitness_2026-10-09" in a cloud test), and the report is saved
+# to the repository with that sentence
+# in it; on the user's computer the same month sits in their own research
+# folder, which may have another name.  "the folder <run> in your research
+# repository" is true on every machine.
+# WHY these two markers: they are the ones research_sync.py itself leaves and
+# reads, as plain files, so no git call is needed to write one sentence.  .git
+# in the parent: the research folder is its own git folder (research_sync's
+# "linked" means exactly that, plus a remote).  .marketing-scraping/plugin/VERSION:
+# research_sync.py cloud-setup wrote it, and repeat.py schedule --mode cloud
+# checks the same file; the cloud routine runs the tools from that copy, so
+# every cloud month has it.  A folder with only one of the two (a research
+# folder that is a git folder for the user's own reasons, or a cloud setup
+# never linked) keeps the <research folder>/<run folder> wording, which is
+# true on the one machine that has it.
+def _in_research_repository(p) -> bool:
+    parent = p.parent
+    try:
+        return ((parent / ".git").exists()
+                and (parent / ".marketing-scraping" / "plugin" / "VERSION").is_file())
+    except OSError:
+        return False
+
+
+def _folder_line(workdir, written) -> str:
+    """Where the written reports are: the folder as the user knows it, and each file in it."""
+    where = _short_folder(workdir)
+    if not written:
+        return f"There is no written report in {where} yet."
+    if len(written) == 1:
+        return f"The written report is in {where}: {written[0]}."
+    return f"The written reports are in {where}: {', '.join(written)}."
+
+
+def _end_note_at(text) -> int:
+    """Where the check's own end note starts, or -1. The last heading counts: the
+    note is always appended after the report, and the top block names the heading
+    only in quotation marks, never as a heading."""
+    return text.rfind("### " + _NOTE_HEADING)
+
+
+def _file_line(name, text) -> str:
+    """One plain line: what the automated quote check found in this report file."""
+    at = _end_note_at(text)
+    m = _NOTE_COUNT_RE.search(text, at) if at >= 0 else None
+    if at >= 0 and not m:
+        # A note is there but its count cannot be read: never say that
+        # nothing was flagged.
+        return (f"{name}: the automated check left a note at the end of that "
+                f"file, under the heading \"{_NOTE_HEADING}\". Read it there.")
+    if not m:
+        # Said positively, and true for a report that quotes no review
+        # ("if there were any"); "looked at" because passages under five words
+        # are not checked (_provenance_note).
+        return (f"{name}: nothing in it is flagged as unverified. Every quoted passage "
+                f"the automated check looked at, if there were any, matched the "
+                f"collected reviews word for word.")
+    n = int(m.group(1))
+    one = n == 1
+    return (f"{name}: {n} quoted passage{'' if one else 's'} could not be matched word for "
+            f"word to the collected reviews, so treat {'it' if one else 'them'} as "
+            f"unverified. {'It is' if one else 'They are'} listed at the end of that file, "
+            f"under the heading \"{_NOTE_HEADING}\".")
+
+
+def _read(p) -> str:
+    return Path(p).read_text(encoding="utf-8", errors="replace")
+
+
+def _has_top_block(text) -> bool:
+    """True when the block sits at the top: as the first heading, or right after the
+    report's own first-line title."""
+    lines = text.split("\n", 3)
+    if lines and lines[0].strip() == TOP_HEADING:
+        return True
+    return (len(lines) >= 3 and lines[0].startswith("# ") and not lines[1].strip()
+            and lines[2].strip() == TOP_HEADING)
+
+
+def check_data(workdir) -> dict:
+    """What the automated quote check found, for the app and for `check --json`:
+    {"folder_line": str, "files": [{"file", "line", "present", "top_block"}]}.
+    top_block says whether the file already starts with the block (a report from
+    an earlier version does not, so the app shows the line itself)."""
+    workdir = Path(workdir)
+    out = {"folder_line": _folder_line(
+               workdir, [n for n in _ALL_REPORT_FILES if (workdir / n).exists()]),
+           "files": []}
+    for name in _REPORT_FILES:
+        p = workdir / name
+        if not p.exists():
+            out["files"].append({"file": name, "present": False, "top_block": False,
+                                 "line": f"{name}: this report file is not in the folder."})
+            continue
+        text = _read(p)
+        out["files"].append({"file": name, "present": True,
+                             "top_block": _has_top_block(text),
+                             "line": _file_line(name, text)})
+    return out
+
+
+def check_lines(workdir) -> list:
+    """Where the reports are, then one plain line per checked report file:
+    what the automated quote check found."""
+    d = check_data(workdir)
+    return [d["folder_line"]] + [f["line"] for f in d["files"]]
+
+
+def cli_lines(workdir) -> list:
+    """What `check` prints: check_lines, then one line naming any report written
+    before the check was put at the top of the file. WHY: the SKILL tells Claude to
+    say each report starts with what the check found; for an older report that is
+    not true, and the first live session on an old folder said it anyway. This line
+    is the code's own signal, so Claude does not have to tell old from new."""
+    d = check_data(workdir)
+    old = [f["file"] for f in d["files"] if f["present"] and not f["top_block"]]
+    out = check_lines(workdir)
+    if old:
+        one = len(old) == 1
+        out.append(f"{', '.join(old)}: written before reports started with what the "
+                   f"automated check found, so {'the top of that file does' if one else 'the tops of those files do'} "
+                   f"not show it. The note named above has it, and the app shows these "
+                   f"lines above the report.")
+    return out
+
+
+def _strip_top_block(text) -> str:
+    """The text without a top block stamped earlier (so a stamp never doubles)."""
+    if not _has_top_block(text):
+        return text
+    start = text.find(TOP_HEADING)
+    end = text.find("\n---\n", start)
+    if end < 0:
+        return text
+    return text[:start] + text[end + len("\n---\n"):].lstrip("\n")
+
+
+def stamp_check_block(workdir, name) -> bool:
+    """Put what the automated quote check found at the top of report file `name`:
+    the folder line (where the reports are, each file named) and this file's own
+    line, both from check_data, so the words are the ones `check` prints. The full
+    end note stays where it is. The block goes right after the report's first-line
+    title, or first when there is none. Returns False when the file is missing or
+    could not be rewritten (the run goes on; the end note is still there)."""
+    p = Path(workdir) / name
+    if not p.exists():
+        return False
+    try:
+        text = _strip_top_block(_read(p))
+        d = check_data(workdir)
+        line = _file_line(name, text)
+        block = f"{TOP_HEADING}\n\n{d['folder_line']}\n\n{line}\n\n---\n"
+        first, sep, rest = text.partition("\n")
+        if first.startswith("# ") and sep:
+            text = f"{first}\n\n{block}\n{rest.lstrip(chr(10))}"
+        else:
+            text = f"{block}\n{text}"
+        p.write_text(text, encoding="utf-8")
+        return True
+    except OSError as exc:
+        print(f"[report] could not add what the automated check found to the top of "
+              f"{name} ({exc})")
+        return False
+
+
+if __name__ == "__main__":
+    import argparse
+    _ap = argparse.ArgumentParser(description="What the automated quote check found in "
+                                              "a run's written reports (reads files only).")
+    _ap.add_argument("command", choices=["check"])
+    _ap.add_argument("--workdir", required=True, help="the run folder")
+    _ap.add_argument("--json", action="store_true", help="print it as JSON (the app reads this)")
+    _args = _ap.parse_args()
+    if _args.json:
+        print(json.dumps(check_data(_args.workdir), ensure_ascii=False))
+    else:
+        print("\n".join(cli_lines(_args.workdir)))

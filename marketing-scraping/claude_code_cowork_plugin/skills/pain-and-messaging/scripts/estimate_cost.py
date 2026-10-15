@@ -29,7 +29,7 @@ def main():
 
     stage = args[0]
     if len(args) < 2:
-        sys.exit("Provide an expected count, e.g. `python3 estimate_cost.py B2a 500`")
+        sys.exit("Provide a step code and an expected count, e.g. `python3 estimate_cost.py B2b 500` (B2b is the Google Maps reviews step)")
     count = float(args[1])
     rate_override = None
     if "--rate" in args:
@@ -40,7 +40,7 @@ def main():
     print(f"\n  Actor:    {actor}")
     print(f"  Expect:   {count:,.0f} {unit}s")
     print(f"  Rate:     ${rate}/{unit}"
-          + (" (override)" if rate_override is not None else " (UNVERIFIED — calibrate)" if unv else ""))
+          + (" (override)" if rate_override is not None else " (UNVERIFIED: calibrate it from a test run)" if unv else ""))
     print(f"  Estimate: ~${usd:.2f}  (incl. {SAFETY_MARGIN}x margin)\n")
 
 

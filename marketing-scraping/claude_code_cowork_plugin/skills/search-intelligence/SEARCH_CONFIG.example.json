@@ -1,5 +1,5 @@
 {
-  "_cost_note": "This tool meters per keyword on YOUR own Apify account. A focused ~300-keyword run costs roughly $2 to $5 (more at 1,000+ keywords), which EXCEEDS Apify's free monthly credit, so a card is required. The forecast prints the exact estimate before spending. This tool is not free; it is cheap next to a $99 to $139 per month subscription.",
+  "_cost_note": "This tool meters per keyword on YOUR own Apify account. A focused ~300-keyword run is forecast at about $3 to $7 (about $7 on Apify's free plan, less on paid plans; more at 1,000+ keywords), which EXCEEDS Apify's free monthly credit, so a card is required. The budget cap below (8.0) holds a default ~300-keyword run's forecast. The forecast prints the exact estimate before spending. This tool is not free.",
   "_input_modes": "Provide EITHER seed_terms (mode 1: keywords you already know) OR a vertical (mode 2: a market label to expand from). Set location for a city-localized SERP; leave it blank for country-level.",
 
   "country_code": "US",
@@ -14,6 +14,6 @@
   "serp_top_n": 100,
   "opportunity_kd_max": 40,
 
-  "budget_caps": { "phase1": 6.0 },
+  "budget_caps": { "phase1": 8.0 },
   "stages": []
 }
