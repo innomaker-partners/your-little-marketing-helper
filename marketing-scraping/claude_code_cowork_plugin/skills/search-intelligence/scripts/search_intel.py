@@ -198,20 +198,61 @@ def _start_charge_notes(workdir, dry_run):
     os.environ[A.CHARGE_NOTES_ENV] = str(p.resolve())
 
 
+def _left_run_notes(notes):
+    """The notes run_phase._note_left_run wrote for runs an earlier command left in a step."""
+    out = []
+    for x in notes:
+        try:
+            d = json.loads(x)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("left_run"):
+            out.append(d)
+    return out
+
+
+def _left_run_sentence(d):
+    """One plain sentence for a run an earlier command left: counted in this total, counted in
+    that earlier command's total instead, or not readable (so the total may be low)."""
+    step, rid = d.get("step") or "one", d.get("left_run")
+    try:
+        usd = float(d.get("usd"))
+    except (TypeError, ValueError):
+        usd = None
+    if d.get("state") == "counted" and usd is not None:
+        if usd <= 0:
+            return ""   # nothing was charged for it, so there is no amount to say is included
+        return (f" This total includes ${usd:.4f} for a run an earlier command left in the "
+                f"{step} step (run {rid}): Apify had already charged it, and it is counted "
+                f"here because this is the run that read it.")
+    if d.get("state") == "earlier":
+        if usd is not None and usd <= 0:
+            return ""
+        how_much = f"charged ${usd:.4f} for it, and that" if usd is not None else "charged for it, which"
+        return (f" The {step} step picked up a run an earlier command left (run {rid}). Apify "
+                f"{how_much} was counted in that earlier command's total, so it is not "
+                f"counted again in this one.")
+    return (f" This may be incomplete: an earlier command left a run in the {step} step "
+            f"(run {rid}) whose charge could not be read, so it is not in this total. You can "
+            f"check it on the Apify console; the run is kept and read again next time.")
+
+
 def _charge_caveat(workdir, earlier=0):
     """" This may be incomplete: ..." when a step's charge was noted as possibly
-    low this run, else "". earlier: steps the folder's total already carries."""
+    low this run, else ""; then one sentence for each run an earlier command left.
+    earlier: steps the folder's total already carries."""
     try:
         notes = [x for x in (Path(workdir) / _CHARGE_NOTES_NAME).read_text(
             encoding="utf-8").splitlines() if x.strip()]
     except OSError:
         notes = []
-    n = len(notes) + earlier
-    if not n:
-        return ""
-    return (f" This may be incomplete: Apify was still recording the charges of {n} "
-            f"paid step{'' if n == 1 else 's'} when the tool stopped waiting, so the "
-            f"real bill can be higher. The exact amount is on the Apify console.")
+    left = _left_run_notes(notes)
+    n = len(notes) - len(left) + earlier
+    out = (f" This may be incomplete: Apify was still recording the charges of {n} "
+           f"paid step{'' if n == 1 else 's'} when the tool stopped waiting, so the "
+           f"real bill can be higher. The exact amount is on the Apify console."
+           if n else "")
+    return out + "".join(_left_run_sentence(d) for d in left)
 
 
 # How the closing line names this tool's records and sources (plain words).
@@ -864,6 +905,12 @@ def _check_incomplete(rc, stage, ceiling, workdir):
             f"{_MAY_BE_CHARGED}\n"
             f"Run the tool once manually to fix the error, then re-schedule."
         )
+    elif _stop_entry(workdir, _failed_stage) and _settings_cap_stop(
+            _failed_stage, _fn, _stop_entry(workdir, _failed_stage), ceiling, cost_line):
+        # The cap in the user's settings, lower than the approved ceiling, refused the
+        # step: the notice names that cap, not the ceiling.
+        msg, report = _settings_cap_stop(
+            _failed_stage, _fn, _stop_entry(workdir, _failed_stage), ceiling, cost_line)
     else:
         # budget stop (reason == "budget" or unknown)
         msg = (f"{_sn} stopped: its next step could have taken the run"
@@ -1160,6 +1207,17 @@ def _incomplete_reason(e):
     if kind == "budget_stop" and e.get("part_way"):
         # The cap stopped this step after part of it had run and been
         # charged (run_phase._note_budget_stop), so "it did not run" was untrue.
+        # When the record holds the figures of a refused forecast the cap was not
+        # reached: the cost estimate for the step, with what was spent, was over it, and
+        # the lines say that and offer both remedies (postprocess.stopped_after_part).
+        cause = _PP.stopped_after_part(e)
+        if cause:
+            return (f"it {cause}. Nothing it collected was kept. To finish it, raise "
+                    f"{_PP.raise_what(e)}"
+                    f"{_PP.or_smaller(e)}, and run the same "
+                    "command on this run folder: this step starts again from the beginning "
+                    f"and the part that already ran {_partway_rerun(e)}, while the steps "
+                    "that finished are skipped and not charged again")
         return ("it started, but the run reached the budget cap in your settings "
                 f"(budget_caps) part-way through it. {_partway_charge(e)}, and nothing "
                 "it collected was kept. To finish it, raise the cap and run the same "
@@ -1167,9 +1225,30 @@ def _incomplete_reason(e):
                 f"and the part that already ran {_partway_rerun(e)}, while the steps "
                 "that finished are skipped and not charged again")
     if kind == "budget_stop":
-        return ("it did not run, because the run reached the budget cap in your settings "
-                "(budget_caps). To run it, raise the cap and run the same command on this "
-                "run folder: the steps that finished are skipped and not charged again")
+        # A step refused on its forecast was never started and nothing was charged for
+        # it; the cap was not reached (in a real buyer's run $0.0362 of $3.00 had been
+        # spent). Both remedies are offered, and what running again does is said: the
+        # step is checked again against the new cap or setting (verified on the fake).
+        later = _PP.later_step_cause(e)
+        if later:
+            # Never priced on its own: an earlier step of this call was stopped, so
+            # this one never started. No size remedy applies to it.
+            return (f"it {later}. Nothing was charged for it, and the steps that "
+                    "finished are skipped and not charged again")
+        cause = _PP.refused_before_start(e)
+        if cause:
+            return (f"it {cause}, so nothing was charged for it. To run it, raise "
+                    f"{_PP.raise_what(e)}"
+                    f"{_PP.or_smaller(e)}, and run the same command "
+                    "on this run folder: this step is checked again against the new cap "
+                    "or setting, and the steps that finished are skipped and not charged "
+                    "again")
+        # A record without figures (written before they were kept, or a stop on spend
+        # already made): words that are true of both.
+        return ("it did not run, because the budget cap in your settings (budget_caps) "
+                "did not allow it. To run it, raise the cap, or make the step smaller, "
+                "and run the same command on this run folder: the steps that finished "
+                "are skipped and not charged again")
     return "a step did not finish"
 
 
@@ -1218,12 +1297,26 @@ def _earlier_result_reason(e, rebuilds=False):
                     "may be incomplete. " + keeps + again)
         return ("its latest attempt stopped with an error (the error is in the run log). "
                 + keeps + again)
+    smaller = (f"Raise {_PP.raise_what(e)}"
+               f"{_PP.or_smaller(e)}, first. ")
     if kind == "budget_stop" and e.get("part_way"):
+        cause = _PP.stopped_after_part(e)
+        if cause:
+            return (f"it {cause}. Nothing it collected was kept. "
+                    + keeps + smaller + again)
         return ("it started, but the run reached the budget cap in your settings "
                 f"(budget_caps) part-way through it. {_partway_charge(e)}, and nothing "
                 "it collected was kept. " + keeps + "Raise the cap first. " + again)
-    return ("the run reached the budget cap in your settings (budget_caps) before "
-            "this step. " + keeps + "Raise the cap first. " + again)
+    later = _PP.later_step_cause(e, remedy=False)
+    if later:
+        return (f"its latest attempt {later}, so nothing was charged for it. "
+                + keeps + again)
+    cause = _PP.refused_before_start(e)
+    if cause:
+        return (f"its latest attempt {cause}, so nothing was charged for it. "
+                + keeps + smaller + again)
+    return ("the budget cap in your settings (budget_caps) did not allow this step to "
+            "run. " + keeps + "Raise the cap, or make the step smaller, first. " + again)
 
 
 def _partway_charge(e):
@@ -1273,6 +1366,69 @@ def _partway_entry(workdir, stage):
             if isinstance(e, dict) and e.get("kind") == "budget_stop" and e.get("part_way"):
                 return e
     return None
+
+
+def _stop_entry(workdir, stage):
+    """The budget_stop record of this step (part-way or not), or None. Found by the
+    step code each record names, as _partway_entry does."""
+    for p in sorted(Path(workdir).glob("*/" + _RUN_INCOMPLETE_FILE)):
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(doc, dict) or doc.get("stage") != stage:
+            continue
+        for e in doc.get("entries") or []:
+            if isinstance(e, dict) and e.get("kind") == "budget_stop":
+                return dict(e, stage=stage)
+    return None
+
+
+def _settings_cap_stop(stage, name, entry, ceiling, cost_line):
+    """(short message, report) for a scheduled run whose step was stopped by the
+    budget cap in the user's settings, which was lower than the approved ceiling; None
+    when the record does not show that (then the ceiling is the limit in force).
+
+    WHY: run_phase uses the lower of the two as the step's cap. With a cap of 3.00 in
+    the settings and a ceiling of 7.00, the notice named the ceiling, said it had been
+    "approached" and told the user to re-schedule with a higher ceiling: raising the
+    ceiling changes nothing, because the cap in the settings is what refused the step.
+    The notice names that cap, says the ceiling was not reached, and says plainly that
+    every scheduled run will refuse the step the same way (and, when the step takes a
+    small first search first, be charged for it each time) until the cap or the step's
+    size setting changes."""
+    try:
+        cap = float(entry["cap_usd"])
+        ceiling_f = float(ceiling)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not cap < ceiling_f - 1e-9:
+        return None
+    cause = _PP.refused_before_start(entry) or _PP.stopped_after_part(entry)
+    fp = entry.get("first_pass") if isinstance(entry.get("first_pass"), dict) else None
+    try:
+        paid = float(fp.get("charged_usd") or 0.0) if fp else 0.0
+    except (TypeError, ValueError):
+        paid = 0.0
+    msg = (f"{name} stopped: the budget cap in your settings (${B.cap_text(cap)}) refused "
+           f"it. Your approved ${B.cap_text(ceiling_f)} ceiling was not reached.")[:200]
+    again = ("Until the budget cap in your settings "
+             + ("changes" if _PP.minimum_limit(entry) else "or the step's size setting changes")
+             + ", "
+             "every scheduled run refuses this step the same way"
+             + (f" and is charged for its first small search each time (about "
+                f"${paid:.4f})" if paid > 0 else "")
+             + ".")
+    report = (
+        f"{name} stopped before completing because of the budget cap in your settings "
+        f"(budget_caps, ${B.cap_text(cap)}), not the approved ceiling of "
+        f"${B.cap_text(ceiling_f)}, which was not reached.\n"
+        + (f"{name} {cause}.\n" if cause else "")
+        + f"{cost_line}\n{again}\n"
+        f"Raise budget_caps (up to your approved ceiling)"
+        f"{_PP.or_smaller(entry, stage)}, run the tool once by hand, then re-schedule."
+    )
+    return msg, report
 
 
 # run_phase writes this record in a step's folder
@@ -1347,7 +1503,10 @@ def _incomplete_lines(workdir):
                                     "could not be read; check the run log"))
             continue
         name = _STAGE_PLAIN.get(doc.get("stage"), doc.get("stage") or "One step")
-        entries = [e if isinstance(e, dict) else {} for e in doc["entries"]
+        # The step's code rides along on each entry, so a stop line can name the
+        # setting that makes that step smaller (postprocess.make_step_smaller).
+        entries = [dict(e, stage=doc.get("stage")) if isinstance(e, dict) else {}
+                   for e in doc["entries"]
                    if not (isinstance(e, dict)
                            and e.get("kind") == "kept_after_failed_attempt")]
         if not entries:
@@ -2114,6 +2273,12 @@ def _main() -> None:
 # the run has stopped on its own: it changes no paid call, no cap and no moment at
 # which the run stops.
 _ATTENDED_STOP_LEAD = "Stopped at the spending cap:"
+# The message for a step the budget gate REFUSED on its forecast before it started. In a real
+# buyer's run $0.0362 of a $3.00 cap had been spent when a $6.00 forecast was refused: the cap
+# was never reached, and "Stopped at the spending cap" said it was. The stage record tells the
+# two apart (_refused_steps), so the message says what the record says.
+_ATTENDED_REFUSED_LEAD = "Not started because the cost forecast did not fit the budget cap:"
+_ATTENDED_LEADS = (_ATTENDED_STOP_LEAD, _ATTENDED_REFUSED_LEAD)
 
 
 def _cap_stopped(workdir):
@@ -2135,6 +2300,41 @@ def _cap_stopped(workdir):
     return False
 
 
+def _refused_steps(workdir):
+    """Plain names of the steps whose stage record says they were never started because
+    their cost forecast did not fit the cap (run_phase's "budget_stop" with the forecast
+    figures and not part_way: postprocess.refused_before_start reads the fields, never the
+    words). A step stopped part-way, or on spend already made, or a scraper run that ended
+    at its cap, is not in the list: for those the cap was reached. A later step that never
+    started because an earlier one was stopped (after_step) takes the earlier step's kind."""
+    kinds, later = {}, []
+    for p in sorted(Path(workdir).glob("*/" + _RUN_INCOMPLETE_FILE)):
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(doc, dict):
+            continue
+        stage = doc.get("stage")
+        for e in doc.get("entries") or []:
+            if not isinstance(e, dict):
+                continue
+            if e.get("kind") == "budget_stop" and e.get("after_step") and not e.get("part_way"):
+                later.append((stage, e.get("after_step")))
+                continue
+            if e.get("kind") == "budget_stop":
+                kind = "refused" if _PP.refused_before_start(e) else "reached"
+            elif e.get("kind") == "run_ended" and e.get("cap_stop"):
+                kind = "reached"
+            else:
+                continue
+            if kinds.get(stage) != "reached":
+                kinds[stage] = kind
+    for stage, after in later:
+        kinds.setdefault(stage, kinds.get(after, "reached"))
+    return [_STAGE_PLAIN.get(s, s or "One step") for s, k in kinds.items() if k == "refused"]
+
+
 def _attended_status_file(workdir):
     """(path, kind, doc) of the folder's notification.json. kind: None when there is
     no file; "ours" when it is the one an attended cap stop wrote (status
@@ -2148,7 +2348,7 @@ def _attended_status_file(workdir):
     except (OSError, ValueError):
         return p, "other", None
     if (isinstance(doc, dict) and doc.get("status") == "incomplete"
-            and str(doc.get("message") or "").startswith(_ATTENDED_STOP_LEAD)):
+            and str(doc.get("message") or "").startswith(_ATTENDED_LEADS)):
         return p, "ours", doc
     return p, "other", doc
 
@@ -2195,10 +2395,20 @@ def _record_attended_stop(workdir):
                       "scheduled run, so it was left as it was.", flush=True)
                 return
             inc = _incomplete_lines(workdir)
-            names = ", ".join(dict.fromkeys(n for n, _ in inc)) or "a step"
+            refused = _refused_steps(workdir)
+            reached = ", ".join(dict.fromkeys(n for n, _ in inc if n not in refused))
+            not_started = ", ".join(dict.fromkeys(n for n, _ in inc if n in refused))
+            if not not_started:
+                message = (f"{_ATTENDED_STOP_LEAD} part of this run did not finish "
+                           f"({reached or 'a step'}).")
+            elif not reached:
+                message = (f"{_ATTENDED_REFUSED_LEAD} part of this run did not finish "
+                           f"({not_started}).")
+            else:
+                message = (f"{_ATTENDED_STOP_LEAD} part of this run did not finish ({reached}). "
+                           f"{_ATTENDED_REFUSED_LEAD} {not_started}.")
             _write_notification(
-                workdir, "incomplete",
-                f"{_ATTENDED_STOP_LEAD} part of this run did not finish ({names}).",
+                workdir, "incomplete", message,
                 report="\n".join(_incomplete_report_lines(inc, scheduled=False)))
             return
         if (not _CLOSING["reached_end"] or _incomplete_lines(workdir)

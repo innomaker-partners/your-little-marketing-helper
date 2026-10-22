@@ -1,7 +1,7 @@
 ---
 name: marketing-viewer
 description: Use whenever the user wants to SEE, BROWSE or WORK THROUGH marketing-scraping results in the local app rather than read a report, or asks what changed between runs; it is also the default last step of ad-intelligence, pain-and-messaging and search-intelligence (run it after every scrape unless the user declined it for that run). Triggers include "open the app", "open the viewer", "show me the ads", "let me look through the reviews", "browse my results", "what am I looking at", "filter these for me", "how many of these mention X", "save these as a view", "star this one", "what changed since last month", "compare with last month", "what's new since the last run". It starts (or reuses) a small local web app on the user's own computer showing every scraped ad, review, Reddit post and search result plus the written reports, counts month-to-month changes in code, and lets you work alongside the user in it. It never scrapes, never spends money and never edits scraped data. Local mode only.
-version: 1.5.0
+version: 1.6.0
 ---
 
 # marketing-viewer (the local app)
@@ -353,6 +353,20 @@ produces stable `maps:<reviewId>` uids when its raw file still has the review id
 does not include it. Never tell the user "nothing disappeared" or "0 new" in that case.
 Say what `cannot_tell_reason` says, e.g. "Google Maps reviews could not be matched to
 last month's, so I can't count which ones are new."
+
+**What the ad library said about a page:** a scraper error for a page is not a statement
+that the page stopped advertising. When `by_platform` holds `library_unknown_now` (or
+`library_unknown_before`), those ads are left out of "no longer there" (or "new") and the
+`summary` says which page the library errored on; repeat that sentence and never turn those
+ads into "gone". When `library_said` holds a sentence such as "Meta's ad library says
+facebook.com/AcmePlumbing is not currently running ads", it is the library's own statement
+and may be quoted as the library's, never as your own finding. Two pages can share a name:
+the comparison ties an ad to a page by page id first, so never tie an ad to a status
+message by name yourself. Never call a page "a different page" yourself when a summary says only that the tool could not
+tie it to the ads' pages: an address name can differ from a display name for one page. When the summary says an address fits ads from more than one page, or that the library's
+records disagree, repeat it as written: the count leaves those ads out because it is not
+known which page the library meant. Never say a source was "not
+collected" when the comparison says the library answered with a status message.
 
 **Search runs:** `query --change` works on the whole run, not per platform (the search
 page has no platform filter, so `--platform` is refused). Each returned record carries

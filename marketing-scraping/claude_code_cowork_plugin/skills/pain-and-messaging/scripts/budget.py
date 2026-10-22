@@ -107,7 +107,16 @@ def cap_text(usd):
 
 
 class BudgetExceeded(Exception):
-    pass
+    # The figures behind a refusal, set by Budget.check() on the exception it
+    # raises (None on a stop that is not a refusal of a forecast, such as the
+    # enforce() stop on spend already made). WHY: the stop record written by
+    # run_phase (_annotate_budget_stop) states the forecast, the amount the run had
+    # spent and the cap, so the closing lines can say what really happened. In a
+    # real buyer's run $0.0362 of a $3.00 cap had been spent when a $6.00 forecast
+    # was refused, and the closing lines said "the run reached the budget cap".
+    estimate_usd = None
+    spent_usd = None
+    cap_usd = None
 
 
 class Budget:
@@ -122,11 +131,15 @@ class Budget:
     def check(self, estimate_usd):
         """Raise before launching a run whose forecast would exceed the cap."""
         if self.spent + estimate_usd > self.cap:
-            raise BudgetExceeded(
+            exc = BudgetExceeded(
                 f"Phase {self.phase}: estimate ${estimate_usd:.2f} + spent "
                 f"${self.spent:.2f} would exceed cap ${cap_text(self.cap)}. "
                 f"Raise budget_caps in the config, tighten inputs, or stop."
             )
+            exc.estimate_usd = float(estimate_usd)
+            exc.spent_usd = self.spent
+            exc.cap_usd = self.cap
+            raise exc
 
     def charge(self, actual_usd):
         self.spent += float(actual_usd or 0.0)

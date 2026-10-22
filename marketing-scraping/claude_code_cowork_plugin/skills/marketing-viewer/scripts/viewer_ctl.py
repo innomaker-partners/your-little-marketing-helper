@@ -391,7 +391,8 @@ def cmd_compare(a):
         # the two months pulled different keywords; counted the same way, so the counts
         # match the sentence in `summary`.
         for cat in ("set_aside_now", "shown_again", "not_pulled_now", "not_pulled_before",
-                    "domains_not_compared_now", "domains_not_compared_before"):
+                    "domains_not_compared_now", "domains_not_compared_before",
+                    "library_unknown_now", "library_unknown_before"):
             if pd.get(cat):
                 counts[plat][cat] = len(pd[cat])
     out_obj = {}

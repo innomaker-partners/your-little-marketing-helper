@@ -37,6 +37,20 @@ import stages as S
 import postprocess as P
 
 
+def _records_saved_text(stage, items, batches=None):
+    """The "full: N records saved" console text of a step. A function of its own so that
+    _run_one stays the same text in all three tools (test_client_drift compares it) while
+    the ad tool's version can tell its Meta scraper's status records from ads."""
+    return f"full: {len(items)} records saved" + (f" across {batches} batches" if batches else "")
+
+
+def _counted_records(stage, items):
+    """How many of a step's records the test pass and its per-record rate count. A function
+    of its own so that _run_one stays the same text in all three tools; only the ad tool
+    has records that are not part of the count (the Meta scraper's status records)."""
+    return len(items)
+
+
 def _save_dataset(stage_dir, tag, items):
     out = Path(stage_dir) / f"run_{tag}.json"
     out.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -114,6 +128,7 @@ def _launch_recover(spec, actor_input, stage_dir, subkey, **run_kw):
         rec = A.reattach(pend.get("runId"), on_status=run_kw.get("on_status"))
         if rec is not None:
             print(f"   ↻ recovered run {pend.get('runId')} for {subkey} (no re-charge)")
+            _arm_counted(spec.get("name", subkey), pend)
             return rec
         _clear_pending(stage_dir)  # unrecoverable -> fall through and re-launch
     actor = spec["actor"]
@@ -227,7 +242,7 @@ def _note_run_incomplete(stage_dir, stage, what, run, n_items):
 
 def _note_step_stopped(stage_dir, stage, kind, cap_usd=None, spent_usd=None,
                        part_way=False, rerun_reuses_run=False,
-                       result_saved=False):
+                       result_saved=False, after_step=None):
     """Record that this step stopped before it finished.
     kind "step_failed": it raised an error; "budget_stop": the run reached the
     budget cap at this step. cap_usd: the cap it was stopped at, so a
@@ -268,6 +283,11 @@ def _note_step_stopped(stage_dir, stage, kind, cap_usd=None, spent_usd=None,
         # This call saved the step's result before it stopped, so
         # the result in the folder is this call's, not an earlier run's.
         entry["result_saved"] = True
+    if after_step:
+        # A later step of the same call that was never priced on its own: the
+        # step before it was stopped, so this one never started. The readers
+        # name that step instead of blaming this step's size or the cap.
+        entry["after_step"] = after_step
     doc["stage"] = stage
     doc["entries"] = entries + [entry]
     try:
@@ -324,14 +344,16 @@ def _note_budget_stop(workdir, order, stage, cap_usd, step_spent_usd, step_runs=
     it is the first run the step launches again (_launch_recover matches subkey
     and input); otherwise an earlier run of the re-run (its test pass) replaces the
     handle and the run is launched and billed again. The later steps never
-    started: they keep the plain record, exactly as before."""
+    started: they keep the plain record plus after_step, the step that was stopped
+    before them, so the closing lines can say that instead of blaming their own size."""
     step_runs = list(step_runs or [])
     for left in order[order.index(stage):]:
         stage_dir = Path(workdir) / STAGES[left]["folder"]
         if _stage_done(stage_dir, STAGES[left]) and not force:
             continue  # Finished and not run again, so not stopped
         if left != stage:
-            _note_step_stopped(stage_dir, left, "budget_stop", cap_usd=cap_usd)
+            _note_step_stopped(stage_dir, left, "budget_stop", cap_usd=cap_usd,
+                               after_step=stage)
             continue
         pending_now = _read_pending(stage_dir) or {}
         _note_step_stopped(stage_dir, left, "budget_stop", cap_usd=cap_usd,
@@ -339,6 +361,47 @@ def _note_budget_stop(workdir, order, stage, cap_usd, step_spent_usd, step_runs=
                            part_way=bool(step_runs),
                            rerun_reuses_run=bool(step_runs)
                            and pending_now.get("subkey") == step_runs[0])
+
+
+def _annotate_budget_stop(workdir, stage, exc):
+    """Add the figures of a refused forecast to the stop record that
+    _note_budget_stop wrote for `stage`: forecast_usd (the cost forecast that did not
+    fit), run_spent_usd (what the run had already spent when it was refused) and, when
+    the exception carries it, first_pass (what a small first search found and cost).
+    The cap is already in the record (cap_usd).
+
+    WHY: the record said only "budget_stop", so the closing lines told the buyer "the
+    run reached the budget cap" and offered one remedy, to raise the cap. In a real
+    buyer's run $0.0362 of a $3.00 cap had been spent and a $6.00 forecast was
+    refused: the cap was never reached, the forecast was over it, and making the step
+    smaller was a remedy the lines never named. With the figures in the record the
+    lines say what happened. A stop that is not a refusal of a forecast (Budget.
+    enforce(): spend already over the cap) carries no forecast and leaves the record
+    as it was, and so do records written before this existed; the readers fall back
+    to words that are true of both. Never raises: bookkeeping must not change what a
+    run does."""
+    estimate = getattr(exc, "estimate_usd", None)
+    if estimate is None:
+        return
+    p = Path(workdir) / STAGES[stage]["folder"] / _INCOMPLETE_NAME
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+        entry = [e for e in doc["entries"]
+                 if isinstance(e, dict) and e.get("kind") == "budget_stop"][-1]
+        entry["forecast_usd"] = round(float(estimate), 6)
+        entry["run_spent_usd"] = round(float(getattr(exc, "spent_usd", 0.0) or 0.0), 6)
+        first_pass = getattr(exc, "first_pass", None)
+        if first_pass:
+            entry["first_pass"] = first_pass
+        min_usd = getattr(exc, "min_usd", None)
+        if min_usd:
+            entry["min_usd"] = round(float(min_usd), 6)
+        ceiling_usd = getattr(exc, "ceiling_usd", None)
+        if ceiling_usd:
+            entry["ceiling_usd"] = round(float(ceiling_usd), 6)
+        p.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        pass
 
 
 def _run_check_incremental(stage, spec, cfg, workdir):
@@ -604,7 +667,10 @@ def _retry_empty_items(stage, spec, items, base_input, stage_dir, budget, args, 
                    + ("" if grew else ", which is less than that"))
         else:
             budget.cap, budget.spent = left0 + approved, 0.0   # the cap as offered, plus the extra they said yes to
-            limit_usd = _cap_for(args, budget, need)
+            try:
+                limit_usd = _cap_for(args, budget, need)
+            except BudgetExceeded:   # the scraper cannot start for what is left
+                limit_usd = 0.0
             if limit_usd < need:
                 why = "the spending limit left for this run is below what the request needs"
     else:
@@ -620,7 +686,10 @@ def _retry_empty_items(stage, spec, items, base_input, stage_dir, budget, args, 
             why = (f"asking again can be charged at most ${cents_up(need_all):.2f}, which would take the run past "
                    f"your budget cap")
         else:
-            limit_usd = _cap_for(args, budget, _call_ceiling(stage, len(ask)))
+            try:
+                limit_usd = _cap_for(args, budget, _call_ceiling(stage, len(ask)))
+            except BudgetExceeded:   # the scraper cannot start for what is left
+                limit_usd = 0.0
             if limit_usd < _call_ceiling(stage, len(ask)):   # never launched with a squeezed limit
                 why = "the spending limit left for this run is below what the request needs"
     if why:
@@ -755,6 +824,11 @@ def _run_approved_second_request(args, cfg, workdir):
               f"({_reason(exc)}). Nothing was spent.")
         return
     budget = Budget(args.phase, 0.0)
+    # main() names the scraper of each step it runs before _cap_for is asked for its limit, so
+    # _cap_for knows the smallest limit Apify accepts for it. This call comes before main()'s
+    # loop and named none: the request was then limited to what 0.01 allows, and Apify raises a
+    # smaller limit to the scraper's own minimum, so a request could be billed past the cap.
+    real_actor, _CAP_ACTOR[0] = _CAP_ACTOR[0], spec.get("actor")
     try:
         _retry_empty_items(stage, spec, items, base_input, stage_dir, budget, args, cfg, workdir,
                            approved=extra)
@@ -762,6 +836,8 @@ def _run_approved_second_request(args, cfg, workdir):
         print(f"   The second request could not be finished ({_reason(exc)}). "
               + (f"It was billed ${budget.spent:.4f}. " if budget.spent > 0 else "Nothing was billed for it. ")
               + "The step's result and what is built from it are as they were.")
+    finally:
+        _CAP_ACTOR[0] = real_actor
 
 
 def _run_after_fetch_hook(stage, spec, items, _inc, _repeat_of,
@@ -799,7 +875,9 @@ def _run_one(stage, spec, cfg, workdir, budget, args):
                                                  runs=C.actor_runs(spec, _est_input))
     # The step's plain name, and its code for --only.
     print(f"\n▶ {spec.get('name', stage)} (step {stage})")
-    print(f"   full-run forecast: ~{est_count} {unit}s → ~${est_usd:.2f}"
+    # "query" is "queries" (a real run printed "~6 querys").
+    print(f"   full-run forecast: ~{est_count} "
+          f"{unit[:-1] + 'ies' if unit.endswith('y') else unit + 's'} → ~${est_usd:.2f}"
           + ("  [rate UNVERIFIED]" if unverified else ""))
     # A step whose full run counts 0 records is not
     # run. config.estimate prices a count of 0 at $0 ("a stage with nothing to do
@@ -902,7 +980,7 @@ def _run_one(stage, spec, cfg, workdir, budget, args):
         append_run_log(stage_dir, f"{stage} (test)", run, len(items), est_usd=est_usd, note="test run")
         append_command(stage_dir, spec["actor"], test_input, run,
                        memory_mb=_mem_for(spec, test_input))
-        n_test = len(items)
+        n_test = _counted_records(stage, items)
         _notices = [m for m in [_run_notice(run, n_test)] if m]
         _notice_usd = test_cost
         print(f"   test: {n_test} records, reported ${test_cost:.3f} "
@@ -990,7 +1068,7 @@ def _run_one(stage, spec, cfg, workdir, budget, args):
             print(f"   incremental: {len(new_only)} new, {len(items)} total after merge+dedup+truncation")
         _save_dataset(stage_dir, "02_full", items)
         _write_notice(stage_dir, _notices, _notice_usd)
-        print(f"   full: {len(items)} records saved across {len(chunks)} batches")
+        print("   " + _records_saved_text(stage, items, len(chunks)))
         print(f"   reported ${full_cost:.3f}  ·  spent ${budget.spent:.2f}/{cap_text(budget.cap)}")
     else:
         run = _launch_recover(spec, full_input, stage_dir, "full",
@@ -1036,7 +1114,7 @@ def _run_one(stage, spec, cfg, workdir, budget, args):
         append_run_log(stage_dir, f"{stage} (full)", run, len(items), est_usd=est_usd)
         append_command(stage_dir, spec["actor"], full_input, run,
                        memory_mb=_mem_for(spec, full_input))
-        print(f"   full: {len(items)} records saved")
+        print("   " + _records_saved_text(stage, items))
         print(f"   reported ${full_cost:.3f}  ·  spent ${budget.spent:.2f}/{cap_text(budget.cap)}")
 
     # Derived artifacts for downstream stages (B1 -> competitor domains).
@@ -1143,19 +1221,81 @@ def _mem_for(spec, actor_input):
     return min(base, per * max(1, n))
 
 
-def _cap_for(args, budget, est_cap):
-    """Per-call maxTotalChargeUsd: est_cap, further bounded by the run ceiling.
+# The scraper of the step now running, so _cap_for knows the smallest limit Apify accepts for
+# it. main() sets it before each step; None (a caller that did not) means only 0.01 applies.
+_CAP_ACTOR = [None]
 
-    WHY: under --standing-approval the user approved a total-run ceiling; that
-    ceiling must be enforced even if a single actor's estimated cap (est_usd *
-    CHARGE_CEILING_FACTOR) would exceed what remains of the budget.  Without
-    --run-ceiling-usd this function is transparent: returns est_cap unchanged.
+
+def _smallest_limit(actor):
+    """The smallest max charge Apify accepts for `actor`: its own minimum when that is known and
+    above 0.01, else 0.01. An unreadable or missing minimum is never a reason to refuse."""
+    smallest = 0.01
+    if actor:
+        try:
+            m = float(A.actor_min_charge(actor))
+            if m == m and m != float("inf") and m > smallest:
+                smallest = m
+        except Exception:  # noqa: BLE001
+            pass
+    return smallest
+
+
+def _left_down(left, need):
+    """What is left, as a refusal prints it: rounded DOWN, never up, to cents, or to more
+    decimals when the shorter figure would read the same as the smallest limit. Rounded to
+    nearest, 0.496 left of a 0.50 minimum read "less than $0.50, and only $0.50 is left"."""
+    left = max(0.0, float(left))
+    shown = cap_text(need)
+    for digits in (2, 4, 6, 8):
+        scale = 10 ** digits
+        text = f"{int(left * scale + 1e-6) / scale:.{digits}f}"
+        if text != shown:
+            return text
+    return text
+
+
+def _cap_for(args, budget, est_cap):
+    """Per-call maxTotalChargeUsd: est_cap, never more than what is left of the cap.
+
+    WHY: est_cap is the forecast times CHARGE_CEILING_FACTOR, so a step whose forecast
+    fits the cap by a hair was still handed 1.5 times that, and a run priced above its
+    forecast could bill past a cap the user set as a hard limit. Every launch (test pass,
+    batch, full run, first pass) takes its limit from here, so bounding it here bounds all
+    of them in all three tools without touching the launch code. A run stopped at this
+    limit ends ABORTED and is reported as cut short, never as complete. The same bound
+    applies to the approved total-run ceiling when one is set.
+
+    Apify refuses a limit below the scraper's own minimum and the client raises a smaller
+    one to it (and to 0.01), so a run launched with less than that left would bill past the
+    cap. Then this raises the budget's own BudgetExceeded, before anything is launched, and
+    the step is refused like any step the cap does not allow; the record carries min_usd so
+    the closing lines say it is the scraper's smallest limit, not the step's size.
     """
+    left = budget.remaining()
     ceiling = getattr(args, "run_ceiling_usd", None)
-    if ceiling is None:
-        return est_cap
-    remaining = max(0.01, ceiling - budget.spent)
-    return min(est_cap, remaining)
+    # The approved ceiling is the limit in force when it leaves no more than the cap does (a
+    # scheduled run's cap is clamped to it): then it is what ran out, and raising budget_caps
+    # would change nothing.
+    ceiling_binds = ceiling is not None and ceiling - budget.spent <= left + 1e-9
+    if ceiling is not None:
+        left = min(left, ceiling - budget.spent)
+    need = _smallest_limit(_CAP_ACTOR[0])
+    if left + 1e-9 < need:
+        exc = BudgetExceeded(
+            f"Phase {budget.phase}: the scraper for this step cannot start for less than "
+            f"${cap_text(need)}, and only ${_left_down(left, need)} of "
+            + (f"your approved ceiling ${cap_text(ceiling)} is left. Raise the approved ceiling, "
+               f"or stop." if ceiling_binds else
+               f"the cap ${cap_text(budget.cap)} is left. Raise budget_caps in the config, "
+               f"or stop."))
+        exc.estimate_usd = need
+        exc.spent_usd = budget.spent
+        exc.cap_usd = budget.cap
+        exc.min_usd = need
+        if ceiling_binds:
+            exc.ceiling_usd = ceiling
+        raise exc
+    return min(est_cap, max(0.01, left))
 
 
 def _say_how_search_results_were_chosen(stage, spec, cfg, workdir, args):
@@ -1177,6 +1317,308 @@ def _say_how_search_results_were_chosen(stage, spec, cfg, workdir, args):
     note = S.serp_selection_note(cfg, str(workdir), dry_run=args.dry_run)
     if note:
         print(f"\n{note}")
+
+
+_ENDED_BADLY = ("FAILED", "ABORTED", "TIMED-OUT", "TIMED_OUT")
+
+
+def _finite_charge(x):
+    """True for a charge that is a finite number of at least 0 (anything else is unreadable)."""
+    return (isinstance(x, (int, float)) and not isinstance(x, bool) and x == x
+            and x not in (float("inf"), float("-inf")) and x >= 0)
+
+
+# A RUN AN EARLIER COMMAND LEFT IS COUNTED WHEN THIS COMMAND READS IT (FROZEN).
+# .pending_run.json names the one run of a step that was launched and not consumed. A step
+# refused at the forecast gate never reaches _launch_recover, and a finished run that this
+# command will not use used to be left in the handle or overwritten by the next launch: its
+# charge was on the Apify bill and in nobody's count (a test pass of 0.045 billed, 0.0000
+# shown). Such a run is read here, outside _run_one, and:
+#   * finished (any end): its final charge is counted once (bill, ledger, RUN_LOG) and the bill
+#     line says so (a note the entry script's closing reads);
+#   * a run that SUCCEEDED and that a later run of this step picks up (_recoverable_runs: its test
+#     pass, or its full run when the test pass is skipped) is kept, because that later run uses it
+#     with no new Apify charge; every other run is cleared, because nothing could pick it up and
+#     the next launch would overwrite it unseen;
+#   * unreadable now (cannot be reached, still running after the wait, or a charge that is not a
+#     finite number of at least 0): the handle is KEPT, nothing is guessed, and the closing says
+#     the charge is not in the bill and where to check it. Clearing it would lose the only way
+#     to the charge; guessing 0 would show a bill lower than Apify's.
+# A run is never counted zero times; when in doubt it is counted twice, never none. A kept run is
+# counted by the command that read it and carries that mark (counted_usd, see "ONE COMMAND
+# COUNTS A RUN'S CHARGE" below), so a later command that reads or picks it up does not count it
+# again; a handle without the mark is counted in full.
+
+_FINAL_STATES = ("SUCCEEDED",) + _ENDED_BADLY
+
+# What this step counted for runs an earlier command left (main() empties it per step). The
+# step's stop record is given the spend MINUS this, so a step that launched nothing is not
+# told as one that "started and ran part of its work" because an old run was counted.
+_LEFT_RUN_USD = [0.0]
+
+# ONE COMMAND COUNTS A RUN'S CHARGE, AND ONLY ONE (FROZEN). A run that a command counted and
+# KEPT (the test pass an earlier command read at its forecast gate, above) is picked up by a
+# later command through the ordinary recovery, and that counts a recovered run's charge like
+# any run's: the same run was in two commands' bills, so together they were above what Apify
+# billed. The command that counts a kept run therefore writes the amount on its handle
+# (counted_usd in .pending_run.json), and a command that picks the run up again finds it there
+# and is charged only what the run cost beyond it (usually nothing). This is done on the Budget
+# the command counts into (_guard_budget), not inside _run_one: _run_one counts every run it
+# is handed, the same way, and cannot know whose count it is. A handle without the mark, or
+# one whose mark cannot be read, is counted in full: the safe side is a run counted twice,
+# never a run counted by nobody.
+_COUNTED_EARLIER = [None]   # (run id, usd): the next charge was already counted that far
+
+
+def _counted_earlier_usd(pend):
+    """What an earlier command counted of the run this handle names (counted_usd), as a float,
+    or None when the handle carries no usable figure."""
+    x = (pend or {}).get("counted_usd")
+    return float(x) if _finite_charge(x) else None
+
+
+def _guard_budget(budget):
+    """Make the next charge on `budget` count only what exceeds what an earlier command
+    already counted for that run (_COUNTED_EARLIER, armed by _arm_counted); every other
+    charge passes unchanged. Idempotent, and it changes this one Budget object only."""
+    if getattr(budget, "_counted_guard", False):
+        return budget
+    real_charge = budget.charge
+
+    def charge(actual_usd):
+        owed, _COUNTED_EARLIER[0] = _COUNTED_EARLIER[0], None
+        _note_charged_run(actual_usd)
+        if owed is not None:
+            try:
+                x = float(actual_usd)
+            except (TypeError, ValueError):
+                x = None
+            if x is not None and x == x:   # a NaN goes through as it is: it is not a charge
+                # A mark that reads higher than the run's own charge (a damaged handle) can
+                # waive that run's charge and no more.
+                return real_charge(max(0.0, x - min(owed[1], x)))
+        return real_charge(actual_usd)
+
+    budget.charge = charge
+    budget._counted_guard = True
+    return budget
+
+
+def _mark_counted(stage_dir, pend, usd):
+    """Write on the handle that `usd` of the run it names is counted (see above)."""
+    try:
+        _write_pending(stage_dir, dict(pend, counted_usd=round(float(usd), 8)))
+    except OSError:
+        pass   # then the next command counts the run again: the safe side
+
+
+def _arm_counted(step, pend):
+    """A run is picked up again from `pend`: when the handle says an earlier command counted
+    it, the next charge is reduced by that amount and the closing says whose count it is."""
+    owed = _counted_earlier_usd(pend)
+    if owed is None:
+        _COUNTED_EARLIER[0] = None
+        return
+    rid = pend.get("runId")
+    _COUNTED_EARLIER[0] = (rid, owed)
+    if owed > 0:
+        print(f"   this run (run {rid}) was already counted in an earlier command's bill "
+              f"(${owed:.4f}), so only what it cost beyond that is counted here")
+    _note_left_run(step, rid, pend.get("subkey"), "earlier", usd=round(owed, 6), kept=True)
+
+
+# A STEP THAT FAILED AFTER A RUN WAS COUNTED MARKS THAT RUN (FROZEN). Every run is counted the
+# moment it ends, before its dataset is fetched, so a fetch that fails (or any failure before the
+# handle is cleared) leaves the handle of a run this command already counted. Without the mark
+# the next command picks it up "with no re-charge" and counts it again: two bills for one run.
+# The guard on the Budget notes each charge with the run the step's handle names at that moment
+# (_CHARGED_RUNS), and main() marks the handle from that when a step fails
+# (_mark_charged_pending). Only a run charged in this command is marked: a handle whose run was
+# launched and not yet charged (a dropped launch) stays unmarked, and so is counted by whoever
+# reads it.
+_STEP_DIR = [None]    # the folder of the step now running (main() sets it before each step)
+_CHARGED_RUNS = {}    # run id -> the run's whole charge, for runs counted in this step
+
+
+def _note_charged_run(usd):
+    """Remember that the run named by the step's handle has been counted, for how much."""
+    folder = _STEP_DIR[0]
+    if folder is None or not _finite_charge(usd):
+        return
+    pend = _read_pending(folder)
+    if pend and pend.get("runId"):
+        _CHARGED_RUNS[pend["runId"]] = float(usd)
+
+
+def _mark_charged_pending(stage_dir):
+    """After a step failed: if its handle names a run this command counted, mark it (see
+    above). Bookkeeping: never raises."""
+    try:
+        pend = _read_pending(stage_dir)
+        usd = _CHARGED_RUNS.get((pend or {}).get("runId"))
+        if usd is not None:
+            _mark_counted(stage_dir, pend, max(usd, _counted_earlier_usd(pend) or 0.0))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _settle_before_launch(stage, spec, cfg, workdir, budget, args):
+    """Count a dropped full or batch run before the step's test pass can overwrite its handle.
+
+    _run_one launches the test pass first, and the launch writes the new run into
+    .pending_run.json: a full or batch run an earlier command launched and dropped was then
+    lost from the handle with its charge counted by nobody, and the step paid for it again. The
+    handle is read here, before _run_one, only when _run_one will go on to launch and will not
+    pick that run up itself (_recoverable_runs is its own skip-the-test rule): then the run is
+    settled by _count_left_run (final charge counted once, logged, set aside), and a run that
+    cannot be read stops the step, because starting it would erase the only record of a charge.
+    A step the forecast gate would refuse launches nothing and is left to the refusal path."""
+    if args.dry_run:
+        return
+    stage_dir = Path(workdir) / spec["folder"]
+    pend = _read_pending(stage_dir)
+    sub = str((pend or {}).get("subkey") or "")
+    if not pend or not pend.get("runId") or not (sub == "full" or sub.startswith("batch")):
+        return
+    if _stage_done(stage_dir, spec) and not args.force:
+        return
+    try:
+        recoverable = _recoverable_runs(spec, cfg, workdir)
+        if args.test_only:   # a test-only call always launches its test pass
+            recoverable = {k for k in recoverable if k[0] != "full"}
+        full_input, est_count = spec["build"](cfg, str(workdir), test=False)
+        if est_count <= 0:
+            return
+        est_usd = C.estimate(stage, est_count, runs=C.actor_runs(spec, full_input))[0]
+        if sub in {k[0] for k in recoverable}:
+            # The step skips its test pass, so _run_one picks a left full run up itself. Its
+            # input may differ from a plain build (a repeat run adds a date filter), so the
+            # kind of run decides here, not the hash.
+            return
+        budget.check(est_usd)
+    except BudgetExceeded:
+        return
+    except Exception:  # noqa: BLE001
+        return
+    if _count_left_run(stage, spec.get("name", stage), stage_dir, budget, pend,
+                       recoverable) == "unread":
+        raise RuntimeError(
+            f"an earlier command left a run in this step (run {pend.get('runId')}, {sub}) whose "
+            f"charge cannot be read now, so the step was not started: starting it would "
+            f"overwrite the only record of that run. It is kept; run the same command again "
+            f"once Apify can be reached")
+
+
+def _note_left_run(step, rid, sub, state, usd=None, kept=False):
+    """Tell the closing bill about a run an earlier command left (the entry script's
+    _charge_caveat reads these lines from the charge notes file). Never raises."""
+    import os
+    path = os.environ.get(A.CHARGE_NOTES_ENV)
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"left_run": rid, "step": step, "sub": sub, "state": state,
+                                "usd": usd, "kept": kept}) + "\n")
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _recoverable_runs(spec, cfg, workdir):
+    """{(subkey, input hash)} of the run a later run of this step would pick up instead of
+    launching again: its test pass, or its full run when the step skips the test pass because
+    the full input is no larger (the same rule as _run_one's skip_test). Empty when the step
+    cannot be built."""
+    try:
+        test_input = spec["build"](cfg, str(workdir), test=True)[0]
+        full_input = spec["build"](cfg, str(workdir), test=False)[0]
+        full_size, test_size = _input_size(spec, full_input), _input_size(spec, test_input)
+        if full_size is not None and test_size is not None and full_size <= test_size:
+            return {("full", _input_hash(full_input))}
+        return {("test", _input_hash(test_input))}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _count_left_run(stage, step, stage_dir, budget, pend, recoverable, run=None):
+    """Count the final charge of the run `pend` names (see the block comment above): "counted"
+    or "unread". `run` is the settled record when the caller already holds it, else the run is
+    read here (a running one is waited out). Launches nothing."""
+    rid, sub, ih = pend.get("runId"), pend.get("subkey"), pend.get("input_hash")
+
+    def unread(why):
+        print(f"   an earlier command left a run in this step (run {rid}, {sub}), but {why}, so "
+              f"its charge is NOT in this bill. The run is kept and read again next time; you "
+              f"can check what it was charged on your Apify console (run {rid})")
+        _note_left_run(step, rid, sub, "unread", kept=True)
+        return "unread"
+
+    owed = _counted_earlier_usd(pend)
+    if owed is not None:
+        # Counted by the command that kept it (see the block above): this one does not count
+        # it again, and the handle stays only while a later run can still pick it up.
+        keep = (sub, ih) in recoverable
+        print(f"   an earlier command left a run in this step (run {rid}, {sub}); it was "
+              f"counted in that command's bill, so it is not counted again here"
+              + (". It is kept for a later run to pick up." if keep else ", and it is set aside."))
+        _note_left_run(step, rid, sub, "earlier", usd=round(owed, 6), kept=keep)
+        if not keep:
+            _clear_pending(stage_dir)
+        return "counted"
+    done = run
+    if done is None:
+        try:
+            info = A._run_info_retry(rid)
+            if info.get("status") not in _FINAL_STATES:
+                A.reattach(rid, on_status=lambda s: print(f"     [{s}]"))
+                info = A._run_info_retry(rid)
+            if info.get("status") not in _FINAL_STATES:
+                return unread("it has not finished")
+            done = A._settle_charge(rid, 3, 30)
+        except Exception as exc:  # noqa: BLE001
+            return unread(f"it cannot be read now ({str(exc)[:100]})")
+    try:
+        cost = A.actual_charge_usd(done)
+    except Exception as exc:  # noqa: BLE001
+        return unread(f"its charge cannot be read now ({str(exc)[:100]})")
+    if not _finite_charge(cost):
+        return unread(f"its charge is not a valid figure ({cost!r})")
+    keep = done.get("status") == "SUCCEEDED" and (sub, ih) in recoverable
+    budget.charge(cost)
+    _LEFT_RUN_USD[0] += cost
+    if keep:
+        _mark_counted(stage_dir, pend, cost)
+    print(f"   an earlier command left a finished run in this step (run {rid}, {sub}); Apify "
+          f"charged ${cost:.4f} for it, and that is counted in this run's bill. "
+          + ("It is kept, so a later run can pick it up again instead of paying for a new one."
+             if keep else
+             f"This tool cannot use it for this step, so it is set aside: its results stay on "
+             f"your Apify account (run {rid}) and a later run of the step starts fresh."))
+    append_run_log(stage_dir, f"{stage} ({sub}, left by an earlier command)", done, "not read",
+                   note=(f"a run an earlier command left; it ended {done.get('status')} and "
+                         f"was charged ${cost:.4f}, counted here. "
+                         + ("It was kept for a later run to pick up."
+                            if keep else "It was set aside: nothing could pick it up.")))
+    _note_left_run(step, rid, sub, "counted", usd=round(cost, 6), kept=keep)
+    if not keep:
+        _clear_pending(stage_dir)
+    return "counted"
+
+
+def _account_left_run(stage, spec, cfg, workdir, budget, args, exc, spent_before):
+    """A step refused at its forecast gate with nothing of it launched or charged in this
+    command: count the run an earlier command left in its handle, if any (see the block
+    comment above). Never launches. A stop on spend already made (no forecast), a dry run and
+    a step that did run something are not this and are left alone."""
+    if (args.dry_run or getattr(exc, "estimate_usd", None) is None or _STEP_RUNS
+            or budget.spent != spent_before):
+        return None
+    stage_dir = Path(workdir) / spec["folder"]
+    pend = _read_pending(stage_dir)
+    if not pend or not pend.get("runId"):
+        return None
+    return _count_left_run(stage, spec.get("name", stage), stage_dir, budget, pend,
+                           _recoverable_runs(spec, cfg, workdir))
 
 
 def _drop_unrun_outputs(steps, workdir, args):
@@ -1246,7 +1688,7 @@ def main():
     # even tighter and must not be silently overridden upward.
     if args.run_ceiling_usd is not None:
         cap = min(cap, args.run_ceiling_usd)
-    budget = Budget(args.phase, cap)
+    budget = _guard_budget(Budget(args.phase, cap))
 
     # Run-level spend ledger.  Each stage subprocess is a fresh Budget(spent=0),
     # so without the ledger _cap_for() sees only the current stage's spend, not the
@@ -1361,21 +1803,35 @@ def main():
         # from "did not run".
         _spent_before = budget.spent
         _STEP_RUNS.clear()
+        _LEFT_RUN_USD[0] = 0.0
+        _COUNTED_EARLIER[0] = None
+        _CHARGED_RUNS.clear()
+        _STEP_DIR[0] = Path(workdir) / spec["folder"]
+        _CAP_ACTOR[0] = spec.get("actor")
         _STEP_SAVED.clear()
         try:
             # Enforce the cap before starting a new stage. Safe boundary:
             # nothing from this stage has been written yet.
             budget.enforce()
+            _settle_before_launch(stage, spec, cfg, workdir, budget, args)
             _say_how_search_results_were_chosen(stage, spec, cfg, workdir, args)
             _run_one(stage, spec, cfg, workdir, budget, args)
         except BudgetExceeded as e:
+            # A step refused before it launched anything still owes the bill a run an earlier
+            # command left in its handle (see _count_left_run). Bookkeeping: never raises.
+            try:
+                _account_left_run(stage, spec, cfg, workdir, budget, args, e, _spent_before)
+            except Exception as _left_exc:  # noqa: BLE001
+                print(f"   could not check the run an earlier command left in this step "
+                      f"({str(_left_exc)[:100]}); its charge is not in this bill")
             print(f"\n⛔ {e}\n   Stopping. Spent ${budget.spent:.2f}.")
             # Every later step in this call did not run. This
             # step may have run part of its work first (_note_budget_stop).
             if not args.dry_run:
                 _note_budget_stop(workdir, order, stage, cap,
-                                  budget.spent - _spent_before, _STEP_RUNS,
+                                  round(budget.spent - _spent_before - _LEFT_RUN_USD[0], 8), _STEP_RUNS,
                                   force=args.force)
+                _annotate_budget_stop(workdir, stage, e)
                 _drop_unrun_outputs(order[order.index(stage):], workdir, args)
             _budget_hit = True
             _stopped_info = {"stage": stage, "reason": "budget",
@@ -1406,6 +1862,10 @@ def main():
                 _note_step_stopped(Path(workdir) / spec["folder"], stage, "step_failed",
                                        result_saved=bool(_STEP_SAVED))
             _drop_unrun_outputs([stage], workdir, args)
+        finally:
+            # However the step ended (a budget stop, an error, a Ctrl-C), a run this command
+            # counted and that is still in the handle is marked as counted (see above).
+            _mark_charged_pending(Path(workdir) / spec["folder"])
     print(f"\n=== Phase {args.phase} done · spent ${budget.spent:.2f}/{cap_text(cap)} ===")
     # Write the run-level ledger BEFORE exiting, so the next subprocess in
     # this tool run reads the correct cumulative spend.  Written even on exit 4

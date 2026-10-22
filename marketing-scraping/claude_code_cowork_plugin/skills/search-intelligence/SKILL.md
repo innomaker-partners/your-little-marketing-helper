@@ -1,7 +1,7 @@
 ---
 name: search-intelligence
-description: Use whenever the user wants search-demand or SEO research, OR wants to repeat or schedule search research they ran before. Triggers include "what does my market search for", "what do people search when looking for [X]", "what terms should I target", "keyword research", "keyword difficulty and volume", "who owns the SERP", "find winnable keywords", "write (or finish) the report for my [X] research", "repeat my [X] research", "set up a monthly repeat", and a prompt with "Run my scheduled marketing research repeat". A past run's report comes only from this skill, never written by hand. Monthly repeats are set up here, never with the cloud schedule skill. Past runs are in ./marketing-research: use this skill, never search the disk. A past run's report, no tool named: newest run. It scrapes real search volume, difficulty, CPC and SERP rankings on the user's OWN Apify account. It meters PER KEYWORD and needs a card on the Apify account (~$3 to $7 per default run, over the free credit); always dry-run first.
-version: 1.5.0
+description: Use whenever the user wants search-demand or SEO research, OR wants to repeat or schedule search research they ran before. Triggers include "what does my market search for", "what do people search when looking for [X]", "what terms should I target", "keyword research", "keyword difficulty and volume", "who owns the SERP", "find winnable keywords", "write (or finish) the report for my [X] research", "repeat my [X] research", "set up a monthly repeat", and a prompt with "Run my scheduled marketing research repeat". A past run's report comes only from this skill, never written by hand. Monthly repeats are set up here, never with the cloud schedule skill. Past runs are in ./marketing-research: use this skill, never search the disk. A past run's report, no tool named: newest run. It scrapes real search volume, difficulty, CPC and SERP rankings on the user's OWN Apify account. It meters PER KEYWORD and needs a card on the Apify account (~USD 3 to USD 7 per default run, over the free credit); always dry-run first.
+version: 1.6.0
 ---
 
 # search-intelligence
@@ -14,11 +14,16 @@ competitive map of who owns the SERP. Every number is counted in code from scrap
 data; the report writer clusters and interprets but never invents a figure.
 
 **This is the expensive tool.** It meters per keyword on the user's Apify account
-and **needs a card** (a ~300-keyword run is forecast at about **$3 to $7**: about $7
+and **needs a card** (a ~300-keyword run is forecast at about **USD 3 to USD 7**: about USD 7
 on Apify's free plan, less on a paid plan, and larger runs cost more). **Never run the paid step without first showing the dry-run forecast
 and getting the user's explicit go-ahead.** Read `${CLAUDE_PLUGIN_ROOT}/docs/SETUP.md`
 once for install, token, and the run-directory convention. Full field docs are in
 `${CLAUDE_PLUGIN_ROOT}/skills/search-intelligence/QUICKSTART.md`.
+
+**Amounts in this file are written as USD 1.23, never with a dollar sign.** Claude Code replaces
+a dollar sign followed by a digit with the words typed after the skill's name, which garbles
+the figure. The tool itself prints amounts with a dollar sign in front; when this file says to
+quote a printed amount, quote it as the tool printed it.
 
 ## Step 0: Set up the run directory (ask the user)
 
@@ -156,11 +161,11 @@ with your own reading of `synthesis_facts.json` in its place.
 1. Find the run with `repeat.py list` (above). If `S1_search_landscape.md` is
    already in its folder, the report exists: go to Step 5.
 2. Otherwise dry-run that folder with the Step 3 command. When a paid step is
-   already collected, the dry run lists it as skipped at $0, and its `WHOLE-RUN
+   already collected, the dry run lists it as skipped at USD 0, and its `WHOLE-RUN
    COST FORECAST` covers only what this run can still spend. If that figure is
-   `$0.0000`, the run spends nothing on Apify: tell the user so and run the Step 4
+   zero (printed as a dollar sign followed by 0.0000), the run spends nothing on Apify: tell the user so and run the Step 4
    command on the same folder without waiting for a go-ahead. If it is above
-   `$0.0000`, show it and wait for the user's go-ahead, as in Step 3.
+   zero, show it and wait for the user's go-ahead, as in Step 3.
 3. Then continue with Step 5 and Step 6, exactly as after any other run, the app
    included.
 
@@ -612,20 +617,20 @@ This prints the full plan (keyword expansion → volume/difficulty/CPC → SERP)
 per-step cost forecast, and spends nothing. **Show the user the forecast, check it
 against `budget_caps.phase1`, and wait for explicit approval before Step 4.** For a
 small sample of real output first, `--test-only` runs each step on a handful of
-keywords and stops (forecast at most about $0.18 with two seed terms, about $0.23
+keywords and stops (forecast at most about USD 0.18 with two seed terms, about USD 0.23
 with five or more).
 
 **The cost to show for approval.** The dry-run ends with a `WHOLE-RUN COST
 FORECAST` line. Show the user that figure: it covers every step (the per-step
 lines above it can leave steps out), and it is the same number `repeat.py
 forecast` gives. It is a worst case, so say "at most". The forecast covers the scraping steps only: writing the search report runs on this computer and costs nothing on Apify. Never add an
-estimate of your own ("well under $1", "similar to last time"), and never state
+estimate of your own ("well under USD 1", "similar to last time"), and never state
 what a past run cost except as that run's own closing line or notification gave it.
 
 **A keyword Semrush has no data for.** The cost block ends with more sentences: a
 keyword that comes back with no data from Semrush is asked for once more, usually at about
-$0.02 each, inside the budget cap and counted in the total billed. If the budget cap
-is a little short for that, by at most $0.25, the user is asked first and nothing
+USD 0.02 each, inside the budget cap and counted in the total billed. If the budget cap
+is a little short for that, by at most USD 0.25, the user is asked first and nothing
 extra is spent without their yes; if it is short by more, only the keywords that fit
 inside the cap are asked for. Give those sentences with the figure, and say they are
 not part of the "at most" amount.
@@ -717,12 +722,12 @@ plugin's skills tell you to edit (the marketing-viewer skill's `resolution.json`
 corrections included) is not this.
 
 **What the run cost.** A run you started here (not a scheduled one) ends with
-one closing line. Quote its amount exactly as printed, all four decimals
-(`$0.2810`, not `$0.28`), and never add up the per-step `reported $...` or
+one closing line. Quote its amount exactly as the tool printed it, sign included, with all four
+decimals (for example 0.2810, not 0.28), and never add up the per-step `reported $...` or
 `spent $...` lines above it: they are rounded to cents and are not the bill.
-- `Total billed: $0.2810. This is the whole run's bill: ...` means the folder was
+- `Total billed: ` then the amount exactly as printed, sign included (four decimals, for example 0.2810), then `. This is the whole run's bill: ...` means the folder was
   new and this run did every step: that amount is what the run cost.
-- `Billed by this run: $0.0000. This folder already held results from an earlier
+- `Billed by this run: ` then the amount exactly as printed, sign included (four decimals, for example 0.0000), then `. This folder already held results from an earlier
   run, ...` means this was a run over a folder that already had finished steps
   (for example to write missing reports or to resume). It is only what this run
   billed, never the month's cost: say so in those words, and never present it,
@@ -811,10 +816,20 @@ the now-complete dataset. Do this first, before anything else.
 - Do NOT research or "verify" the failure before resuming, and do NOT start a
   fresh run or hand-build a merge/dedupe workaround: a fresh run re-charges for
   data you already have. Resume is the cheap, correct default.
+- If a closing line says a step was not started because its cost forecast was more
+  than the budget cap, nothing was charged for that step, and the cap was not
+  reached: the step's forecast, added to what the run had already spent, was over it.
+  Offer the user both remedies and let them choose: raise `budget_caps`, or make the
+  step smaller with the setting the line names (`keyword_cap`, `serp_top_n` or fewer `seed_terms`).
+  Running the same command on the folder then checks that step again against the new
+  cap or setting. Any line that says something was charged means that money was
+  spent, whatever it says about the cap. A line that says an earlier step was stopped
+  by the budget cap, and that this step did not run, is not a size problem of this
+  step: running the stopped step again runs it too.
 - If the tool says it stopped at the spend cap, ask the user first: raising
   `budget_caps` lets the run spend more, so raise it only after they agree to
   the new cap, then resume. Running the tool again on the folder is a new
-  command, and its cap counts from $0 again: tell the user the new cap is what
+  command, and its cap counts from USD 0 again: tell the user the new cap is what
   that command may spend on top of what was already spent. Only if resurrecting
   genuinely fails do you consider alternatives, and say so plainly.
 - When the user says a run was cut off, believe them and resume; don't re-verify
@@ -938,6 +953,6 @@ them.
 
 ## Notes
 
-- **Cost:** a ~300-keyword run is forecast at about $3 to $7 (about $7 on Apify's
+- **Cost:** a ~300-keyword run is forecast at about USD 3 to USD 7 (about USD 7 on Apify's
   free plan; paid Apify plans charge less per keyword); scales with `keyword_cap` and
   `serp_top_n`. It is not free. The forecast is always shown first.

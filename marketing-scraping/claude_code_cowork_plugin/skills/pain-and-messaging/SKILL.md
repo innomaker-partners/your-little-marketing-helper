@@ -1,7 +1,7 @@
 ---
 name: pain-and-messaging
 description: Use whenever the user wants reviews of an app, company or competitor, to mine customer reviews, or wants to repeat or schedule review research they ran before. Triggers include "App Store reviews for [X]", "Google Play reviews for [app]", "Trustpilot reviews for [company]", "what are people saying about [X]", "G2 or Capterra reviews for [tool]", "what do customers complain about", "voice-of-customer research", "write (or finish) the report for my [X] research", "repeat my [X] research", "set up a monthly repeat", and a prompt with "Run my scheduled marketing research repeat". A plain "I want the App Store reviews for [product]" is this skill, not a web search. A past run's report comes only from this skill, never written by hand. Monthly repeats are set up here, never with the cloud schedule skill. Past runs are in ./marketing-research: use this skill, never search the disk. A past run's report, no tool named: newest run. It scrapes on the user's OWN Apify account and costs real money; always dry-run first.
-version: 1.5.0
+version: 1.6.0
 ---
 
 # pain-and-messaging
@@ -21,6 +21,11 @@ the run-directory convention. Full config-field documentation lives in
 `${CLAUDE_PLUGIN_ROOT}/skills/pain-and-messaging/QUICKSTART.md`; consult it for
 sources, Maps input modes, and every field. A finished pain-points report example is at
 `${CLAUDE_PLUGIN_ROOT}/skills/pain-and-messaging/examples/E1_pain_points_SAMPLE.md`.
+
+**Amounts in this file are written as USD 1.23, never with a dollar sign.** Claude Code replaces
+a dollar sign followed by a digit with the words typed after the skill's name, which garbles
+the figure. The tool itself prints amounts with a dollar sign in front; when this file says to
+quote a printed amount, quote it as the tool printed it.
 
 ## Step 0: Set up the run directory (ask the user)
 
@@ -159,11 +164,11 @@ reading of `synthesis_facts.json` in its place.
    `E2_trust_signals.md` are already in its folder, the reports exist: go to
    Step 5.
 2. Otherwise dry-run that folder with the Step 3 command. When a paid step is
-   already collected, the dry run lists it as skipped at $0, and its `WHOLE-RUN
+   already collected, the dry run lists it as skipped at USD 0, and its `WHOLE-RUN
    COST FORECAST` covers only what this run can still spend. If that figure is
-   `$0.0000`, the run spends nothing on Apify: tell the user so and run the Step 4
+   zero (printed as a dollar sign followed by 0.0000), the run spends nothing on Apify: tell the user so and run the Step 4
    command on the same folder without waiting for a go-ahead. If it is above
-   `$0.0000`, show it and wait for the user's go-ahead, as in Step 3.
+   zero, show it and wait for the user's go-ahead, as in Step 3.
 3. Then continue with Step 5 and Step 6, exactly as after any other run, the app
    included.
 
@@ -639,7 +644,7 @@ approval before Step 4.**
 FORECAST` line. Show the user that figure: it covers every step (the per-step
 lines above it can leave steps out), and it is the same number `repeat.py
 forecast` gives. It is a worst case, so say "at most". The forecast covers the scraping steps only: writing the pain and trust reports runs on this computer and costs nothing on Apify. Never add an
-estimate of your own ("well under $1", "similar to last time"), and never state
+estimate of your own ("well under USD 1", "similar to last time"), and never state
 what a past run cost except as that run's own closing line or notification gave it.
 
 **Confirm each source resolved to the right entity, not just the cost.** Every
@@ -739,12 +744,12 @@ plugin's skills tell you to edit (the marketing-viewer skill's `resolution.json`
 corrections included) is not this.
 
 **What the run cost.** A run you started here (not a scheduled one) ends with
-one closing line. Quote its amount exactly as printed, all four decimals
-(`$0.2810`, not `$0.28`), and never add up the per-step `reported $...` or
+one closing line. Quote its amount exactly as the tool printed it, sign included, with all four
+decimals (for example 0.2810, not 0.28), and never add up the per-step `reported $...` or
 `spent $...` lines above it: they are rounded to cents and are not the bill.
-- `Total billed: $0.2810. This is the whole run's bill: ...` means the folder was
+- `Total billed: ` then the amount exactly as printed, sign included (four decimals, for example 0.2810), then `. This is the whole run's bill: ...` means the folder was
   new and this run did every step: that amount is what the run cost.
-- `Billed by this run: $0.0000. This folder already held results from an earlier
+- `Billed by this run: ` then the amount exactly as printed, sign included (four decimals, for example 0.0000), then `. This folder already held results from an earlier
   run, ...` means this was a run over a folder that already had finished steps
   (for example to write missing reports or to resume). It is only what this run
   billed, never the month's cost: say so in those words, and never present it,
@@ -795,10 +800,20 @@ the now-complete dataset. Do this first, before anything else.
 - Do NOT research or "verify" the failure before resuming, and do NOT start a
   fresh run or hand-build a merge/dedupe workaround: a fresh run re-charges for
   data you already have. Resume is the cheap, correct default.
+- If a closing line says a step was not started because its cost forecast was more
+  than the budget cap, nothing was charged for that step, and the cap was not
+  reached: the step's forecast, added to what the run had already spent, was over it.
+  Offer the user both remedies and let them choose: raise `budget_caps`, or make the
+  step smaller with the setting the line names (for example `trustpilot_max_reviews`, `reddit_max_posts` or `app_max_reviews`).
+  Running the same command on the folder then checks that step again against the new
+  cap or setting. Any line that says something was charged means that money was
+  spent, whatever it says about the cap. A line that says an earlier step was stopped
+  by the budget cap, and that this step did not run, is not a size problem of this
+  step: running the stopped step again runs it too.
 - If the tool says it stopped at the spend cap, ask the user first: raising
   `budget_caps` lets the run spend more, so raise it only after they agree to
   the new cap, then resume. Running the tool again on the folder is a new
-  command, and its cap counts from $0 again: tell the user the new cap is what
+  command, and its cap counts from USD 0 again: tell the user the new cap is what
   that command may spend on top of what was already spent. Only if resurrecting
   genuinely fails do you consider alternatives, and say so plainly.
 - When the user says a run was cut off, believe them and resume; don't re-verify
@@ -924,7 +939,7 @@ them.
 ## Notes
 
 - **Cost:** a Maps run of three named competitors at 100 reviews each (the example
-  settings) is forecast at about $0.43 to $0.49, the higher figure on Apify's free
+  settings) is forecast at about USD 0.43 to USD 0.49, the higher figure on Apify's free
   plan; per-source
   per-event rates are in QUICKSTART.md §8. The forecast is always shown first.
 - **The `claude` report step runs without MCP servers loaded** (via --strict-mcp-config, for a faster start with no side effects). If blank browser windows open or a report stalls for minutes, the copy is old/modified or someone piped the prompt into `claude` by hand; let `pain_intel.py` invoke the CLI itself. See QUICKSTART.md §9.

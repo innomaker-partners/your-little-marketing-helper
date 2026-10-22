@@ -1118,6 +1118,8 @@ function paintCompareStrip() {
       || (p.shown_again || []).length + (p.set_aside_now || []).length > 0
       || (p.not_pulled_now || []).length + (p.not_pulled_before || []).length > 0
       || (p.domains_not_compared_now || []).length + (p.domains_not_compared_before || []).length > 0
+      || (p.library_unknown_now || []).length + (p.library_unknown_before || []).length > 0
+      || (p.library_said || []).length > 0
       || (p.cannot_tell || []).length > 0
     )
     .map(([plat, p]) => {
@@ -1141,10 +1143,17 @@ function paintCompareStrip() {
       const dmThem = (n) => n === 1 ? "it" : "them";
       if (dmNow) parts.push(`${dm(dmNow)} from ${baseLabel} left out of the count of those not in this run (no ranking for ${dmThem(dmNow)} was found on a keyword with search results in both runs)`);
       if (dmBefore) parts.push(`${dm(dmBefore)} found in this run left out of the count of new ones (no ranking for ${dmThem(dmBefore)} was found on a keyword with search results in both runs)`);
+      // (compare.py): the source's own library errored on a page in one run, so that
+      // page's ads are neither new nor not in this run: the tool does not know.
+      const luNow = (p.library_unknown_now || []).length, luBefore = (p.library_unknown_before || []).length;
+      const adN = (n) => `${num(n)} ${n === 1 ? "ad" : "ads"}`;
+      if (luNow) parts.push(`${adN(luNow)} from ${baseLabel} left out of the count of those not in this run (the ad library returned an error for ${luNow === 1 ? "its page" : "their pages"} in this run)`);
+      if (luBefore) parts.push(`${adN(luBefore)} in this run left out of the count of new ones (the ad library returned an error for ${luBefore === 1 ? "its page" : "their pages"} in ${baseLabel})`);
       const countStr = parts.length ? parts.join(", ") : "";
       const notPulledWhy = (npNow || npBefore || dmNow || dmBefore) ? "Search results are pulled for a limited set of keywords, and which ones can change from month to month." : "";
       const cannotTellReason = p.cannot_tell_reason || "";
-      const body = [countStr, notPulledWhy, cannotTellReason].filter(Boolean).join("; ");
+      const libraryWords = (p.library_said || []).join(" ");
+      const body = [countStr, notPulledWhy, cannotTellReason, libraryWords].filter(Boolean).join("; ");
       return `<span class="cmpstrip-platrow"><span class="cmpstrip-plat">${esc(platLabel(plat))}:</span> ${esc(body)}</span>`;
     });
 
@@ -1160,6 +1169,11 @@ function paintCompareStrip() {
         ? `Search results were pulled in ${baseLabel} but not in this run`
         : `Search results were pulled in this run but not in ${baseLabel}`;
       return `<span class="cmpstrip-platrow"><span class="cmpstrip-plat" style="font-style:italic">${esc(t)}</span></span>`;
+    }
+    // The other run's ad library answered with a status message instead of ads: it was
+    // asked, so "not collected" would be false; say what it said (compare.py).
+    if (Array.isArray(item.library_said) && item.library_said.length) {
+      return `<span class="cmpstrip-platrow"><span class="cmpstrip-plat" style="font-style:italic">${esc(item.library_said.join(" "))}</span></span>`;
     }
     const text = item.in_run === "baseline"
       ? (aside ? `${pLabel} ads were collected in this run, but all ${num(aside)} were set aside because the advertiser's name does not match the competitor`
@@ -2270,6 +2284,16 @@ function runStatusNotes(runId, meta) {
     .map(s => s && s.sentence).filter(Boolean);
   if (unfinished.length) {
     out.push(`<div class="carriednotice" data-note="unfinished-steps">${unfinished.map(l => `<div>${esc(l)}</div>`).join("")}</div>`);
+  }
+  // What a scraper itself said about a place it searched (emit_index "source_notes":
+  // the Meta library's "this page is not currently running ads", or an error whose
+  // result is unknown). Such a record is not an ad, so it has no card and no count; the
+  // sentence was made once by the ad tool (adrecords) and is shown as written, never
+  // worked out here. Nothing for an index without the key. Inline, like the notes above.
+  const sourceNotes = (meta && Array.isArray(meta.source_notes) ? meta.source_notes : [])
+    .map(s => s && s.sentence).filter(Boolean);
+  if (sourceNotes.length) {
+    out.push(`<div class="carriednotice" data-note="source-notes">${sourceNotes.map(l => `<div>${esc(l)}</div>`).join("")}</div>`);
   }
   out.push(setAsideNote(meta));
   out.push(reportCheckNote(meta));

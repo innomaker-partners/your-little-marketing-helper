@@ -5,7 +5,7 @@
 > **What a strong report contains:** a lettered angle taxonomy (A to H) with example copy per angle and a frequency; a duration-weighted effectiveness ranking (which angles the longest-running ads use); a platform comparison (Meta vs Google vs LinkedIn: who advertises where, which angles per platform, the platform gap); a prioritised gap analysis (underused angles that map to high customer relevance); a headline bank plus anti-patterns; and a creative brief (positioning, the first angles to test, seasonal timing). Close with actionable takeaways.
 
 ## About this analysis
-> Generated: {{DATE}}. Sources: Meta (N service ads), Google Ads Transparency (C creatives / A advertisers, with durations), Google Search ads, LinkedIn Ad Library (L ads, with impression counts where reported). Seasonal timing from the search-intelligence tool when available. _Note any source that failed and the substitute used. If a source returned 0 ads, say that it returned none (and in which countries, if the search was limited), never that a competitor runs no ads there: the run cannot tell a real zero from a scraper that fetched nothing._
+> Generated: {{DATE}}. Sources: Meta (N service ads), Google Ads Transparency (C creatives / A advertisers, with durations), Google Search ads, LinkedIn Ad Library (L ads, with impression bands where reported). Seasonal timing from the search-intelligence tool when available. _Note any source that failed and the substitute used. If a source returned 0 ads, say that it returned none (and in which countries, if the search was limited), never that a competitor runs no ads there: the run cannot tell a real zero from a scraper that fetched nothing._
 
 ## Executive summary
 _3 to 6 bullets: what the market sells, what endures, the biggest creative gap, the timing._
@@ -20,7 +20,7 @@ _From Google Ads Transparency: the longest-running advertisers and creatives and
 ### Meta
 ### Google Search
 ### LinkedIn
-_B2B-first: note whether competitors run LinkedIn at all, which angles they use there, and impression counts where LinkedIn reports them. If LinkedIn returned no ads, say only that it returned none (and in which countries, if the search was limited); that is unconfirmed, not a finding that competitors skip LinkedIn._
+_B2B-first: note whether competitors run LinkedIn at all, which angles they use there, and impression bands (as LinkedIn gives them, such as 5k-10k) where LinkedIn reports them. If LinkedIn returned no ads, say only that it returned none (and in which countries, if the search was limited); that is unconfirmed, not a finding that competitors skip LinkedIn._
 ### Platform gap summary
 _Who advertises where, which angles dominate each platform, where the client should be that competitors aren't._
 

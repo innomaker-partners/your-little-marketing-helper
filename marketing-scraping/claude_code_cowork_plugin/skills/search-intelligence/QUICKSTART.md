@@ -35,18 +35,20 @@ own Claude Code CLI. No vendor lock-in, no subscription.
 1. Sign up at [apify.com](https://apify.com) and add a payment method (a real
    run costs more than the free monthly credit; see the cost note above).
 2. Give the tool your token one of two ways:
-   - **CLI:** install the Apify CLI (`npm install -g apify-cli`) and run
-     `apify login`. The tool reads `~/.apify/auth.json` automatically.
+   - **CLI:** install the Apify CLI (`npm install -g apify-cli`; this needs a recent
+     Node.js, see `docs/SETUP.md`, Route 2) and run `apify login`. The tool reads
+     `~/.apify/auth.json` automatically.
    - **Environment variable:** copy `scripts/.env.example` to `scripts/.env`,
      fill in `APIFY_TOKEN=your_token_here`, then run
      `set -a; source scripts/.env; set +a` before invoking the tool. (This
-     `scripts/.env` route works from a checkout; an installed plugin's folder is
-     read-only, so use the CLI login or the save-once step below instead.)
+     `scripts/.env` route is meant for a checkout. For an installed plugin use the CLI
+     login or the save-once step below, which do not depend on where the plugin is
+     installed.)
    - **Save an exported token once:** with `APIFY_TOKEN` set in your shell, run
      `python3 ${CLAUDE_PLUGIN_ROOT}/skills/search-intelligence/scripts/config.py --persist-token`.
      It stores the token in `~/.apify/auth.json` so later runs reuse it, and
      prints only a masked confirmation. If a different login is already saved
-     there, that login is kept, nothing is saved, and the command says so.
+     there, that login is kept, nothing is saved, and the command says so. In your own terminal `${CLAUDE_PLUGIN_ROOT}` is not set: `docs/SETUP.md` (Route 1) gives a line that finds the plugin folder for you. Do not paste the token into a chat with Claude.
 
 ---
 

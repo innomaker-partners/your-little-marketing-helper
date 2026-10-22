@@ -196,7 +196,8 @@ def resolve_from_serp(names: list[str], workdir: str | Path) -> list[dict]:
     Reads: <workdir>/B1_serp_competitors/run_02_full.json (falls back to
            run_01_test.json if the full run hasn't been saved yet).
     Writes: <workdir>/competitors/domains.json (bare domain strings list),
-            which is the file _curated_domains / build_B5 consumes.
+            which _curated_domains / build_B5 read only when there is no
+            competitors/resolution.json with entries (that file decides otherwise).
 
     Returns a list of {"name": str, "domain": str | None, "note": str}.
     The `domain` is None when no non-directory result was found; the `note`

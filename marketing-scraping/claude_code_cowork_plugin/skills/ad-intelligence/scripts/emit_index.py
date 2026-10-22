@@ -19,6 +19,7 @@ Re-index:   python3 scripts/emit_index.py --workdir <run> [--config <file>]   (f
 """
 
 import json
+import math
 import os
 import re
 import shutil
@@ -29,6 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resolve as RS  # noqa: E402  google_ad_owners: whose Google ads are the competitors'
+import adrecords as AR  # noqa: E402  ad or scraper status record; text dates
 
 SCHEMA_VERSION = 1
 TOOL_ID = "ad"          # the index's "tool" field; reindex refuses another tool's run
@@ -103,20 +105,24 @@ def _epoch_seconds(*vals):
     """First value that looks like a Unix epoch -> int seconds. Accepts int/float or an
     all-digit string; treats 13-digit values as milliseconds. None if nothing usable.
     Meta ships start_date/end_date as epochs; Google ships firstShownAt/lastShownAt as
-    epochs; LinkedIn ships neither."""
+    epochs; LinkedIn ships text dates (read by _date_seconds)."""
     for v in vals:
         if isinstance(v, bool):  # bool is an int subclass; never a date
             continue
         n = None
-        if isinstance(v, (int, float)):
-            n = float(v)
-        elif isinstance(v, str) and v.strip().isdigit():
-            n = float(v.strip())
-        if n is None or n <= 0:
+        try:
+            if isinstance(v, (int, float)):
+                n = float(v)
+            elif isinstance(v, str) and v.strip().isdigit():
+                n = float(v.strip())
+            # Not finite (inf, nan, or a number too large for a float) is no date.
+            if n is None or not math.isfinite(n) or n <= 0:
+                continue
+            if n > 1e12:  # milliseconds
+                n /= 1000.0
+            return int(n)
+        except (OverflowError, ValueError):
             continue
-        if n > 1e12:  # milliseconds
-            n /= 1000.0
-        return int(n)
     return None
 
 
@@ -143,6 +149,26 @@ def _norm_date(*vals):
             s = v.strip()
             if len(s) >= 10 and s[4] == "-" and s[7] == "-" and s[:4].isdigit():
                 return s[:10]  # date part of 'YYYY-MM-DD...' or 'YYYY-MM-DD HH:MM:SS'
+            # A text date such as the LinkedIn scraper's "Sep 14, 2026". It used to
+            # collapse to None here, so a LinkedIn ad's dates were blank in the app.
+            dt = AR.parse_shown_date(s)
+            if dt is not None:
+                return dt.strftime("%Y-%m-%d")
+    return None
+
+
+def _date_seconds(*vals):
+    """_epoch_seconds, then, for a value that is a text date ("Sep 14, 2026"), that
+    date's start as epoch seconds. WHY: the duration of a LinkedIn ad needs both ends
+    as numbers, and its dates are text; with epochs only, no LinkedIn ad had one."""
+    secs = _epoch_seconds(*vals)
+    if secs is not None:
+        return secs
+    for v in vals:
+        if isinstance(v, str):
+            dt = AR.parse_shown_date(v)
+            if dt is not None:
+                return int(dt.timestamp())
     return None
 
 
@@ -261,8 +287,13 @@ def _cards(snap):
                                 ("cta_text", "cta_text"), ("link_url", "link_url"),
                                 ("caption", "caption")):
             v = c.get(in_key)
-            if isinstance(v, str):
-                v = v.strip()
+            # Card copy is text. A list, a dict or a flag in its place is no copy, and
+            # skipping that field keeps one malformed card from stopping the whole index.
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                v = str(v)
+            if not isinstance(v, str):
+                continue
+            v = v.strip()
             if v and v != "None":
                 card[out_key] = v
         if card:
@@ -280,7 +311,10 @@ def _dedupe_cards(cards):
     seen = set()
     out = []
     for c in cards:
-        key = tuple(c.get(k) for k in ("title", "body", "cta_text", "link_url", "caption"))
+        # Compared by text form, so a card with an odd value (a list, a dict) cannot
+        # raise on the unhashable key.
+        key = tuple(json.dumps(c.get(k), sort_keys=True, default=str)
+                    for k in ("title", "body", "cta_text", "link_url", "caption"))
         if key in seen:
             continue
         seen.add(key)
@@ -298,6 +332,34 @@ def _original_ad_url(rec, platform):
     return url
 
 
+def _scalar_text(v):
+    """A page id as text: a string or a number; anything else is no id."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (str, int)):
+        s = str(v).strip() if len(str(v)) < 100 else ""
+        return s or None
+    return None
+
+
+def _page_slug(uri):
+    """The address name in a page address ('facebook.com/<name>/'), or None. An address
+    that gives the page by number (profile.php?id=55) has no name: see
+    adrecords.facebook_page_ref."""
+    return AR.facebook_page_ref(uri)[1] or None
+
+
+def _source_note_entry(platform, n):
+    """One index source_notes entry. "sentence" is what the app shows; the rest says which
+    page it is about and what the library said, so the month-to-month comparison can tie
+    last month's ads to it (compare.py). Empty parts are left out."""
+    e = {"platform": platform, "kind": n["kind"], "sentence": n["sentence"],
+         "where": n.get("where"), "detail": n.get("detail"), "search": bool(n.get("search")),
+         "page_id": n.get("page_id"), "page_name": n.get("page_name"),
+         "page_slug": n.get("page_slug"), "conflict": n.get("conflict")}
+    return {k: v for k, v in e.items() if v not in (None, "", False) or k in ("platform", "kind", "sentence")}
+
+
 def _ad_envelope(rec, platform, subject, run_file, raw_index, manifest, creatives_subdir):
     """Map ONE ad record -> the shared envelope. Pure; no I/O.
     Uses canonical field names (the LI aliases from postprocess._pp_li are already
@@ -311,13 +373,14 @@ def _ad_envelope(rec, platform, subject, run_file, raw_index, manifest, creative
 
     # Dates: normalize to ISO for display AND keep the epoch for duration/sort. Meta gives
     # both an epoch (start_date) and a human string (start_date_formatted); Google gives an
-    # epoch (firstShownAt); LinkedIn gives neither, so these stay absent for it.
+    # epoch (firstShownAt); LinkedIn gives text dates ("Sep 14, 2026") that adrecords reads.
+    # A date that cannot be read leaves these absent, never a guess.
     first_shown = _norm_date(rec.get("start_date_formatted"), rec.get("start_date"),
                              _first(rec, "firstShownAt", "firstShownDate"))
     last_shown = _norm_date(rec.get("end_date_formatted"), rec.get("end_date"),
                             _first(rec, "lastShownAt", "lastShownDate"))
-    first_ts = _epoch_seconds(rec.get("start_date"), _first(rec, "firstShownAt"))
-    last_ts = _epoch_seconds(rec.get("end_date"), _first(rec, "lastShownAt"))
+    first_ts = _date_seconds(rec.get("start_date"), _first(rec, "firstShownAt", "firstShownDate"))
+    last_ts = _date_seconds(rec.get("end_date"), _first(rec, "lastShownAt", "lastShownDate"))
     duration_days = None
     if first_ts and last_ts and last_ts >= first_ts:
         duration_days = round((last_ts - first_ts) / 86400)
@@ -329,8 +392,10 @@ def _ad_envelope(rec, platform, subject, run_file, raw_index, manifest, creative
 
     put("advertiser_name", advertiser)
     put("headline", _first(rec, "title", "headline") or snap.get("title"))
+    # `ctas` is a list in the scrapers' output; a value of another type is no CTA, not a crash.
+    _ctas = rec.get("ctas")
     put("cta_text", _first(rec, "cta_text", "ctaText") or snap.get("cta_text")
-        or (rec.get("ctas") or [None])[0])
+        or (_ctas[0] if isinstance(_ctas, list) and _ctas else None))
     put("format", _ad_format(rec, snap, media))
     # The advertiser's landing page: only what the ad itself carries. The Google
     # actor puts `originUrl` on every record, and it is the scraper's own search
@@ -357,6 +422,11 @@ def _ad_envelope(rec, platform, subject, run_file, raw_index, manifest, creative
     if isinstance(iwi, dict):
         put("impressions_text", iwi.get("impressions_text"))
     put("native_id", rec_id)                  # lets the viewer distinguish near-identical ads
+    # Which page an ad belongs to (Meta): the month-to-month comparison ties last
+    # month's ads to the scraper's status record for a page through these.
+    put("page_id", _scalar_text(_first(rec, "page_id", "pageId") or snap.get("page_id"))
+        or AR.facebook_page_ref(snap.get("page_profile_uri"))[0] or None)
+    put("page_slug", _page_slug(snap.get("page_profile_uri")))
     cards = _cards(snap)                       # Meta carousel: per-card copy (see _cards)
     if cards:
         # Show DISTINCT copy once; keep the original slot count so the viewer can say
@@ -470,6 +540,8 @@ def build_index(workdir, cfg):
     records = []
     by_platform = {}
     set_aside = {}
+    meta_status = []  # Meta scraper status records: not ads, so never in "records"
+    meta_ads_raw = []  # the real Meta ads, to tell a page the library said runs none from one that does
     entries = _read_json(workdir / "competitors" / "resolution.json", []) or []
     # A "google_advertisers" key the tool does not read (put directly in
     # the entry, say) changed nothing, and the rebuild said nothing. Say so on stderr,
@@ -512,6 +584,13 @@ def build_index(workdir, cfg):
                 continue
             if owner is not None and owner[i] != "own":
                 continue
+            if platform == "meta" and AR.is_meta_status_record(rec):
+                # Not an ad: counted nowhere, shown as a card nowhere. The run file
+                # keeps it; the app shows what the library said (source_notes).
+                meta_status.append(rec)
+                continue
+            if platform == "meta":
+                meta_ads_raw.append(rec)
             records.append(
                 _ad_envelope(rec, platform, subject, run_file, i, manifest, creatives_subdir)
             )
@@ -537,6 +616,16 @@ def build_index(workdir, cfg):
     }
     if set_aside:
         index["set_aside"] = set_aside
+    # What the Meta scraper itself said about a page it searched ("Ads not found"),
+    # as plain sentences made once, in adrecords, so the app shows them as written.
+    # Present only when there were such records; a normal index is unchanged.
+    if meta_status:
+        # A "no ads" statement for a page this same run holds ads of is not used: the ads
+        # win (kind "both": told in the closing lines of the run, left out of the index).
+        notes = [_source_note_entry("meta", n)
+                 for n in AR.meta_status_notes(meta_status, meta_ads_raw) if n["kind"] != "both"]
+        if notes:
+            index["source_notes"] = notes
     # Present only when a step of this run did not finish (failed, stopped
     # by the budget cap, or a scraper run that did not work), so the app and the month
     # comparison can tell that apart from a step that ran and found nothing. The
@@ -640,6 +729,10 @@ def reindex(workdir, config_path=None):
     path = build_index(workdir, cfg)
     new_n = len((_read_json(path, {}) or {}).get("records") or [])
     old_n = len(prev.get("records") or [])
+    # An index written before status records were set apart counted them as ads. When
+    # the new index is empty because those were all it held, the rebuild is right.
+    _on_disk = _read_json(workdir / _PLATFORMS["meta"][0], [])
+    old_n -= sum(AR.is_meta_status_record(r) for r in _on_disk) if isinstance(_on_disk, list) else 0
     if new_n == 0 and old_n > 0:
         shutil.copy2(backup, out)
         raise SystemExit(f"Re-index found 0 records where the old index had {old_n}; the old "

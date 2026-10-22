@@ -19,10 +19,11 @@ claude plugin marketplace add <path-or-url-to-this-folder>
 claude plugin install marketing-scraping@marketing-scraping-local
 ```
 
-The plugin installs read-only into Claude Code's plugin cache. You never edit or
-run anything inside that cache; you run each tool against a **run directory** of
-your own (see below), and the plugin's scripts are reached through the
-`${CLAUDE_PLUGIN_ROOT}` path the skills already use.
+Claude Code may copy the plugin into its own plugin cache (`~/.claude/plugins/cache/`),
+and an update can replace that copy, so do not keep anything of yours in the plugin's
+folder and do not edit files there. You never need to: you run each tool against a
+**run directory** of your own (see below), and the plugin's scripts are reached
+through the `${CLAUDE_PLUGIN_ROOT}` path the skills already use.
 
 ## What you need
 
@@ -38,34 +39,140 @@ your own (see below), and the plugin's scripts are reached through the
   it only to read the text off Google ad images; its report is filled in from a
   bundle by Claude in your session or any model you choose.
 - **Python 3.9 or newer** (a Mac already has it): standard library only, nothing to `pip install`.
+- **A recent Node.js, only if you choose the Apify CLI route** for the token
+  (below; the Apify CLI install page lists the version it needs). The route that comes first needs nothing beyond Python.
 
 ## Give the tools your Apify token
 
-The install directory is read-only, so the old "drop a `.env` in `scripts/`"
-route does not apply. Use one of these instead; both work regardless of where
-the plugin is installed:
+First copy your token from the **API & Integrations** page of the Apify Console
+(`console.apify.com/settings/integrations`). Treat it like a password.
 
-- **Apify CLI (recommended):** `npm install -g apify-cli` then `apify login`.
-  The tools read `~/.apify/auth.json` automatically. Nothing else to do.
-- **Environment variable:** export `APIFY_TOKEN=apify_api_...` in the shell
-  session Claude Code runs in (e.g. add it to your shell profile). Every tool
-  reads `APIFY_TOKEN` first.
-- **Nothing to do: the token saves itself.** Whichever of the two routes above
-  you use, the first run that reads `APIFY_TOKEN` from the environment also saves
-  it to `~/.apify/auth.json` automatically (unless a different login is already
-  saved there: that one is kept), so later runs never re-ask. To save it
-  explicitly first, without running a scrape:
+**Do not paste the token into a chat with Claude.** Everything shown in a
+conversation stays in its history, and the skills never need you to: you give the
+token to your own terminal, as below.
 
-  ```bash
-  export APIFY_TOKEN=apify_api_...
-  python3 ${CLAUDE_PLUGIN_ROOT}/skills/search-intelligence/scripts/config.py --persist-token
-  ```
+The tools find the token in two places, in this order: the `APIFY_TOKEN`
+environment variable of the process Claude Code runs them in, then the saved login
+file `~/.apify/auth.json`. Route 1 puts the token in the file, which needs nothing
+beyond the Python you already have.
 
-  It reads the token from the environment (never as an argument), merges it into
-  `~/.apify/auth.json`, and prints a masked confirmation. If a different login is
-  already saved there, such as an earlier `apify login`, that login is kept,
-  nothing is saved, and the command says so. Any of the three tools' `config.py` does this; they share
-  the same token file.
+### Route 1 (recommended): save it once with the plugin's own script
+
+On a Mac, in Terminal.app. This route needs nothing beyond the Python you already
+have: it does not use the `claude` command, an export line or your shell profile.
+
+**Step 1.** Open a **new** Terminal window (press Cmd and Space, type `Terminal`,
+press Return).
+
+**Step 2.** Copy the whole block below, paste it into that window and press Return.
+It finds the folder where Claude Code keeps the marketing-scraping plugin (the newest
+enabled install, if you have more than one) and runs the plugin's save script from
+there. The script then asks for your token: paste it and press Return. Nothing is
+shown as you paste, and the token is not recorded in your shell history, because it is
+never typed on a command line. The token is the long text that starts with
+`apify_api_` on the Apify Console page named above; the script refuses anything else
+and saves nothing.
+
+```bash
+P=$(python3 -c '
+import json, os, sys
+try:
+    home = os.path.expanduser("~")
+    root = os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR") or os.path.join(home, ".claude", "plugins")
+    installs = json.load(open(os.path.join(root, "installed_plugins.json")))["plugins"]
+    try:
+        settings = json.load(open(os.path.join(home, ".claude", "settings.json")))
+        off = [k for k, v in settings.get("enabledPlugins", {}).items() if v is False]
+    except (OSError, ValueError, AttributeError):
+        off = []
+    found = []
+    for pid, entries in installs.items():
+        if not pid.startswith("marketing-scraping@"):
+            continue
+        for e in (entries if isinstance(entries, list) else [entries]):
+            path = str(e.get("installPath") or "") if isinstance(e, dict) else ""
+            if path and os.path.isfile(os.path.join(path, "skills", "search-intelligence", "scripts", "config.py")):
+                found.append((pid not in off, str(e.get("lastUpdated") or ""), path))
+    print(max(found)[2])
+except Exception:
+    sys.exit("Could not find the marketing-scraping plugin automatically. If it is not installed yet, install it with the two commands in the Install section of this guide (SETUP.md) and run this block again. If it is installed, use the manual line under this block in the same guide (Route 1), or Route 2.")
+') && python3 "$P/skills/search-intelligence/scripts/config.py" --persist-token
+```
+
+**The manual line.** If the block cannot find the plugin but it is installed, run
+this instead, with the plugin's folder in place of `<plugin folder>`:
+
+```bash
+python3 "<plugin folder>/skills/search-intelligence/scripts/config.py" --persist-token
+```
+
+To find the plugin's folder:
+
+1. In Terminal, run `claude plugin list`. Find the entry that starts with
+   `marketing-scraping@`. Under it is a line that starts "Read from:" (on some
+   installs the line starts "Path:") followed by a folder. Copy that folder.
+2. Paste it in place of `<plugin folder>` and keep the double quotes around it, so a
+   folder name with a space in it still works.
+
+If your entry shows no such line, use the folder you added as a marketplace, the one
+that holds the `skills` folder.
+
+Any of the three tools' `config.py` does the same; they share one token file.
+
+**Step 3.** Check the message. A line that starts "Saved Apify token", then the last
+four characters of your token and the full path of your `auth.json` file, and ends
+"(mode 600)." means it worked. "Apify token" followed by the same four characters
+and "was already saved" means it already was. "No token was entered" means you
+pressed Return on an empty line: run the block again. "That does not look like an
+Apify API token" means what you pasted is not just `apify_api_` followed by letters and
+digits (a stray space, semicolon or quote, a token pasted twice, or a partial paste):
+nothing was saved, copy the token from the Apify Console and run the block again. "A different Apify login is already saved" means a login from an earlier
+`apify login` was kept and nothing was saved (see below). "Could not find the
+marketing-scraping plugin automatically" means the block could not locate it: install
+it (the two commands under "Install") if you have not, or use the manual line above.
+
+**Step 4.** Close the window. The token is now in `~/.apify/auth.json`. Claude Code
+reads that file each time a tool runs, so a Claude Code session that was already open
+picks it up, with no restart.
+
+The script reads the token from the `APIFY_TOKEN` environment variable if it is set
+and otherwise asks for it, hidden, when it is run by a person at a terminal (never as
+an argument). If you paste a whole line at the prompt that starts with the word
+export, or with the variable name and an equals sign, it uses the value after the
+equals sign. It merges the token into `~/.apify/auth.json` and prints a masked
+confirmation. If a different login is already saved there, such as an earlier
+`apify login`, that login is kept, nothing is saved, and the command says so.
+
+### Route 2: the Apify CLI
+
+`npm install -g apify-cli`, then `apify login`. The tools read `~/.apify/auth.json`
+automatically. This route needs a recent Node.js, which includes `npm` (the Apify CLI install page
+lists the version it needs). A stock Mac does
+not have it: install it with the macOS installer from nodejs.org, then open a new
+Terminal window before running the commands. If `npm` reports a permissions error
+(`EACCES`), use Route 1 instead. Apify's own page lists its other install routes:
+`docs.apify.com/cli/docs/installation`.
+
+### Route 3: the environment variable, kept in your shell profile
+
+Add `export APIFY_TOKEN=apify_api_...` as a line in the `~/.zshrc` file in your home
+folder (create the file if it does not exist). Every tool reads `APIFY_TOKEN` first.
+
+Add it with a text editor, not by typing the line into a Terminal window: what you
+type into Terminal is kept in plain text in your shell history (`~/.zsh_history`).
+
+**An edit to a shell profile such as `~/.zshrc` reaches only terminal windows, and
+the Claude Code sessions started from them, that were opened after the edit.** A
+window or a Claude Code session that was already running does not see it, and
+neither does the Route 1 script run in such a window (it stops with "Set APIFY_TOKEN
+in the environment first"). Open a new window, and start a new Claude Code session
+from it. Route 1 does not depend on a profile at all, which is why it comes first.
+
+**Nothing else to do: the token saves itself.** Whichever way the token reaches a
+run, the first run that reads `APIFY_TOKEN` from the environment also saves it to
+`~/.apify/auth.json` automatically (unless a different login is already saved there:
+that one is kept), so later runs never re-ask. Route 1 is that save, done by hand
+without running a scrape.
 
 **How long the saved token lasts.** In local Claude Code, `~/.apify/auth.json` is
 on your real machine, so it is permanent. You enter the token once, ever. In
@@ -172,7 +279,7 @@ Inside that directory the skill puts:
 - every scraped-data folder and the finished report(s) the run produces.
 
 The tool is invoked with `--workdir <run-dir>` and `--config <run-dir>/<config>`,
-so nothing is ever written into the read-only plugin install.
+so a run's own files are kept out of the plugin's folder.
 
 ---
 
@@ -208,8 +315,9 @@ forecast**, and spends nothing. The skills always run the dry-run first, show yo
 the forecast, and wait for your go-ahead before the paid run. Never skip it.
 
 **Every run is also hard-capped, automatically.** On top of the forecast, each
-actor run is launched with a spend ceiling of about 1.5 times its forecast. That
-ceiling is passed to Apify as a hard billing cap, and the tool also watches the
+actor run is launched with a spend ceiling of about 1.5 times its forecast, and
+never more than what is left of your budget cap. That ceiling is passed to Apify
+as a hard billing cap, and the tool also watches the
 live charge while the run is going and stops the run itself if it ever crosses
 the ceiling. This is what keeps a scraper that ignores its own limits from
 running up a surprise bill: if a review scraper is told to fetch a small number

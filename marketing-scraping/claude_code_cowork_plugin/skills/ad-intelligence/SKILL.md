@@ -1,7 +1,7 @@
 ---
 name: ad-intelligence
 description: Use whenever the user wants to see what ads a company is running or research a competitor's advertising, OR wants to repeat or schedule ad research they ran before. Triggers include "show me what ads [competitor] is running", "what is [company] advertising", "find ads for [brand]", "what ads are my competitors running", "analyze competitor ad angles", "scrape Meta/Google/LinkedIn ads", "competitor ad intelligence", "what creative angles work in my market", "ad library research", "repeat my [X] research", "run my [X] research again", "set up a monthly repeat", "run this every month", and a prompt with "Run my scheduled marketing research repeat". Monthly repeats are set up here, never with the cloud schedule skill. Past runs are in ./marketing-research: use this skill, never search the disk. A past run's report, no tool named: newest run. It scrapes the Meta, Google and LinkedIn ad libraries on the user's OWN Apify account and downloads the creatives. It costs real money; always dry-run first.
-version: 1.5.0
+version: 1.6.0
 ---
 
 # ad-intelligence
@@ -18,6 +18,11 @@ go-ahead.** Read `${CLAUDE_PLUGIN_ROOT}/docs/SETUP.md` once for install, token, 
 the run-directory convention. Full config-field documentation lives in
 `${CLAUDE_PLUGIN_ROOT}/skills/ad-intelligence/QUICKSTART.md`. Consult it for any
 field not covered here.
+
+**Amounts in this file are written as USD 1.23, never with a dollar sign.** Claude Code replaces
+a dollar sign followed by a digit with the words typed after the skill's name, which garbles
+the figure. The tool itself prints amounts with a dollar sign in front; when this file says to
+quote a printed amount, quote it as the tool printed it.
 
 ## Step 0: Set up the run directory (ask the user)
 
@@ -166,11 +171,11 @@ its place.
 2. Otherwise the bundle has to be put together by running the Step 4 command again
    on that folder, and that can spend money: every step that had not finished runs
    again and is charged. So dry-run that folder with the Step 3 command first. When
-   a paid step is already collected, the dry run lists it as skipped at $0, and its
+   a paid step is already collected, the dry run lists it as skipped at USD 0, and its
    `WHOLE-RUN COST FORECAST` covers only what this run can still spend. If that
-   figure is `$0.0000`, the run spends nothing on Apify: tell the user so and run
+   figure is zero (printed as a dollar sign followed by 0.0000), the run spends nothing on Apify: tell the user so and run
    the Step 4 command on the same folder without waiting for a go-ahead. If it is
-   above `$0.0000`, show it and wait for the user's go-ahead, as in Step 3. The
+   above zero, show it and wait for the user's go-ahead, as in Step 3. The
    run's closing lines then give the actual bill. If the figure is not available
    yet, the approval covers the lookup only, as in Step 3.
 3. Then continue with Step 5 and Step 6, exactly as after any other run, the app
@@ -597,26 +602,74 @@ Open `<run-dir>/AD_INTEL_CONFIG.json` and set at minimum:
 
 - **`country_code`**: the primary market (`"us"`, `"gb"`, `"de"`).
 - **`vertical`**: a short market label (`"emergency plumber"`), for labelling.
-- **Competitors:** `competitor_domains` (best, e.g. `["acmeplumbing.com"]`), or
-  `competitor_names`, or both, or leave both empty and set `seed_terms` to let
-  the tool discover competitors from a SERP for the user to confirm. "Both" can
-  mean different companies in each list, or the same company given both ways: a
-  name and a domain that are the same company (`"Revolut"` and `"revolut.com"`)
-  are ONE competitor, searched by its name, with the domain checked against what
-  the search finds. A name matches a domain when it spells the domain's first
-  part (Acme Plumbing and acmeplumbing.com); a name that does not (Ben & Jerry's
-  and benjerry.com) stays a second competitor, so list such a company once.
+- **Competitors:** whenever the user knows both a company's name and its website, write
+  them as ONE entry in `competitor_names`, the website in brackets after the name:
+  `"Acme Strategy Advisors (acmesa.com)"`. This is the most reliable input: the website is
+  the one used for Google ads, and the name is what the Facebook page, the LinkedIn
+  company and the advertiser names on Google ads are matched against. The exact rule: the
+  brackets are read as a website when they hold one word (no spaces inside; spaces around
+  it are fine) that has `www.` or `https://` in front (any case), or that ends in
+  one of about 200 common website endings (`.com`, `.net`, `.org`, `.io`, `.shop`,
+  `.store`, `.online`, `.agency`, `.consulting`, `.xyz` and so on) or in any two-letter
+  country code (so `.co.uk` and `.com.au` work), with that ending written in one case
+  (`.com` or `.COM`), and whose name before the ending is not a company form or generic
+  word (`Ltd`, `Inc`, `Co`, `Corp`, `Est`, `Shop`, `Group` and so on) and has at least
+  three characters. The name itself may use any case: `AcmePlumbing.com`, `Acme.com`
+  and `BestDrains.co.uk` are websites and are used in lower case. A word that ends in a
+  capitalised word (`Pty.Ltd`, `St.Louis`, `Inc.Co`) or whose name part is a company form
+  (`Ltd.co`, `Co.uk`, `Corp.ai`, `no.de`) is read as a name: start it with `https://` if
+  it really is a website. A website typed alone as an entry (not in brackets) follows the
+  name-part rule too (`Inc.Co` or `co.uk` alone is read as a name, with a notice) but not
+  the case rule (`AcmePlumbing.com` or `Acme.Co.Uk` alone is a website). In
+  `competitors/resolution.json`, `use` is one website; a percent-escape in it
+  (`acme%2Ecom`) is read once, and one that spells a `/`, an `@`, a space or another `%`
+  makes the run stop with a plain message before anything is searched. Anything else stays part of the name: `"Acme (UK) Ltd"`
+  and `"Best Drains (Chicago)"` silently, and a dotted bracket that is not taken as a
+  website (`"Acme Pty (Pty.Ltd)"`, `"Best Drains (St.Louis)"`) with a notice at the start
+  of the run saying the company will be looked up by search and the website it finds
+  shown as unconfirmed. That unconfirmed website carries a warning on the company's
+  Google line in the resolution report, and the closing lines and the data digest repeat
+  it, so a namesake's website is never searched without a sign. A social, link-shortener,
+  link-in-bio, profile or directory address in the brackets (`facebook.com/...`,
+  `fb.com`, `instagr.am`, `lnkd.in`, `youtu.be`, any Google country address,
+  `bit.ly`, `linktr.ee`, `wa.me`, `medium.com`, `crunchbase.com`, `yelp.com/...`) is not
+  the company's website: only the name is used and the run says how to give the website;
+  the same address in `competitor_domains` is skipped with a notice. One name given with two different websites
+  uses the first and the run names the other. Otherwise use `competitor_domains`
+  (e.g. `["acmeplumbing.com"]`), or `competitor_names`, or leave both empty and set
+  `seed_terms` to let the tool discover competitors from a SERP for the user to confirm.
+  "Both" in separate lists can mean different companies in each list, or the same company
+  given both ways: a name and a domain that are the same company (`"Revolut"` and
+  `"revolut.com"`) are ONE competitor, searched by its name, with the domain used for
+  Google. A name matches a domain across the two lists only when it spells the domain's
+  first part (Acme Plumbing and acmeplumbing.com); a name that does not (Ben & Jerry's
+  and benjerry.com) stays a second competitor unless it is written with the bracket form.
+  A website the user gives is the one Google is searched for; the report shows the
+  search's best match beside it and does not swap it in. A company given by name alone
+  takes the search's best website, which can differ between runs, so check that line.
+  Changing the website given for a company already resolved counts as a change to the
+  competitor list: it is looked up again and shown for confirmation.
 - **`meta_search_terms`**: optional; leave empty for normal use. Meta searches each
   competitor by its Facebook page. These words are used only when no competitor has
   a page, and they find every advertiser using them, not just the competitors.
 - **`budget_caps.phase1`**: the hard USD spend ceiling for the run.
 
-For LinkedIn ads (the only source with real impression counts), set
+For LinkedIn ads (the only source with impression figures, given as bands such as 5k-10k rather than exact counts), set
 `competitor_names` or let the tool derive them from domains; set
 `include_linkedin: false` to skip. For a cheap trial, lower
 `meta_limit_per_source` and `google_max_items` (e.g. 20 / 30). Meta can return
 somewhat more ads than `meta_limit_per_source`, and every ad it returns is billed.
 It can be up to 30 more for each page or search, and the cost forecast counts them.
+
+`google_max_items` is the limit for each Google run, and up to 10 website searches (one per website and country) share one run.
+When a website with no ads sits in a run whose limit was filled by the others, the
+closing lines say "Google ads for <website> may not have been reached" and that its 0 is
+not a finding. Pass that on as written and never report that website as running no
+Google ads. The cheap, certain way to search it is a new folder made with
+`repeat.py prepare --from` this one, with the website as the only competitor there and
+`"stages": ["B5"]`. Raising `google_max_items` in that copy buys every other website's
+Google ads again and may still not reach the website if one advertiser has more ads
+than the new limit. Running the same folder again skips the finished Google step.
 
 To run only some of the ad searches, set **`stages`** to a list of their step
 codes. The codes are the ones in the progress lines the tool prints, for example
@@ -638,7 +691,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/ad-intelligence/ad_intel.py \
 This prints the execution plan and a cost forecast and spends nothing. Once the
 competitors are confirmed, the whole-run forecast at the example settings (about 200
 Meta ads and up to 100 LinkedIn ads per competitor, up to 2,000 Google ads) is at most about
-$9.77 for 2 competitors and $11.74 for 3. It is a worst case, so a real run usually
+USD 9.77 for 2 competitors and USD 11.74 for 3. It is a worst case, so a real run usually
 costs less. **Show the user the forecast and wait for
 explicit approval before Step 4.** In discovery mode, the tool surfaces candidate
 competitors here for the user to confirm before any paid scrape.
@@ -647,7 +700,7 @@ competitors here for the user to confirm before any paid scrape.
 FORECAST` line. Show the user that figure: it covers every step (the per-step
 lines above it can leave steps out), and it is the same number `repeat.py
 forecast` gives. It is a worst case, so say "at most". The forecast covers the ad scraping steps only: downloading the creatives, reading the ad images and putting the report together run on this computer and cost nothing on Apify. Never add an
-estimate of your own ("well under $1", "similar to last time"), and never state
+estimate of your own ("well under USD 1", "similar to last time"), and never state
 what a past run cost except as that run's own closing line or notification gave it.
 
 If that line says the figure is not available yet (the
@@ -660,6 +713,47 @@ each competitor resolved to: a validated domain, and for LinkedIn the numeric
 company id (e.g. `[id 68529]`). Check these are the intended companies before
 approving. A LinkedIn source with no numeric id is skipped rather than guessed at,
 so if a competitor shows no id, that source will be empty for them by design.
+The Google website line shows the website that will be searched. When the search found a
+different best match, the line carries a `⚠ the website you gave; the search's best match
+is X` marker and the line beneath it names that match: the website the user gave is the
+one searched, so the user should check they typed it right (a typo searches another
+company's website and an empty result then looks like "runs no Google ads"). A tick means
+the search agrees. The closing lines and the data digest repeat it as "Google searched X
+as you gave it; the search's best match for it was Y". A `MISMATCH` warning means the
+website in use is not the one the user gave.
+Two files name the Google websites: `use` in `competitors/resolution.json` (the one to
+edit) and `competitors/domains.json`, which the tool writes from it. Editing `use` alone
+works; the tool rewrites `domains.json` to match. If `domains.json` was edited by hand, or
+a folder from an older version has the two disagreeing, the tool cannot tell which website
+was meant, so it does not search the competitors concerned, says so at the resolution step
+and in the closing lines ("Google ads: not searched for X, because ..."), and stops an
+interactive run at the confirmation step. The fix it gives is: make `use` the right website,
+delete `domains.json` (the tool writes it again), and run the same command on the folder.
+A `domains.json` that exists but cannot be read (a stray comma, an empty file, a record in
+place of a list) is treated the same way for every competitor: nothing is searched and the
+file is left as it is. A `resolution.json` that cannot be read in the shape the tool writes
+stops the run before anything is looked up or charged, in every mode, and is not changed.
+What the closing lines say Google searched comes from the Google step's own record of what
+it searched in this folder, never from the settings: a website the settings now name but the
+folder's finished Google step never searched is reported as not searched, and the way to
+search it is a new folder made with `repeat.py prepare`.
+Tell the user which competitors were not searched; their Google ads are missing, not absent. Google ads from an advertiser whose name does not match the competitor are set
+aside and named in the report, never counted as the competitor's: setting a real ad aside
+is visible and fixable, while counting another company's ad would go unnoticed. When a
+set-aside advertiser is the competitor's (a holding company, the owner's name), the fix is
+to add that name to the competitor's Google advertisers. Giving the name with the website
+already covers an advertiser that uses the company's full name. The match is anchored:
+an advertiser counts when its name STARTS with the name the user gave (whole words, after
+"The", or after "DBA" / "trading as"), so "Best Drains Plumbing of Leeds" is "Best
+Drains" and "Joe's Best Drains" is not. When only a website was given and its name is one ordinary word,
+the advertiser's whole name must be that word (company words like Ltd or Services
+aside), so plumbing.com never claims "Joe Bloggs Plumbing Ltd" or hubspot.com a
+partner agency; a name of two or more words ("Mr. Rooter" for mrrooter.com) also
+counts a franchisee whose name starts with it. A website that is a name's first
+word or words plus the initials of ALL its other words (acmesa.com for "Acme Strategy
+Advisors LLC") counts that name, but not "Acme Strategy Advisors Group Holdings". The
+residue: a website made of two ordinary words can count a stranger who starts with the
+same two words and advertises that website.
 The same holds for Meta: a competitor with no Facebook page is not searched on
 Meta, and the report lists it under `NOT searched on Meta`. Tell the user which
 competitors those are and that their Meta ads will be missing, then offer the fix
@@ -761,12 +855,12 @@ plugin's skills tell you to edit (the marketing-viewer skill's `resolution.json`
 corrections included) is not this.
 
 **What the run cost.** A run you started here (not a scheduled one) ends with
-one closing line. Quote its amount exactly as printed, all four decimals
-(`$0.2810`, not `$0.28`), and never add up the per-step `reported $...` or
+one closing line. Quote its amount exactly as the tool printed it, sign included, with all four
+decimals (for example 0.2810, not 0.28), and never add up the per-step `reported $...` or
 `spent $...` lines above it: they are rounded to cents and are not the bill.
-- `Total billed: $0.2810. This is the whole run's bill: ...` means the folder was
+- `Total billed: ` then the amount exactly as printed, sign included (four decimals, for example 0.2810), then `. This is the whole run's bill: ...` means the folder was
   new and this run did every step: that amount is what the run cost.
-- `Billed by this run: $0.0000. This folder already held results from an earlier
+- `Billed by this run: ` then the amount exactly as printed, sign included (four decimals, for example 0.0000), then `. This folder already held results from an earlier
   run, ...` means this was a run over a folder that already had finished steps
   (for example to write missing reports or to resume). It is only what this run
   billed, never the month's cost: say so in those words, and never present it,
@@ -824,10 +918,31 @@ the now-complete dataset. Do this first, before anything else.
 - Do NOT research or "verify" the failure before resuming, and do NOT start a
   fresh run or hand-build a merge/dedupe workaround: a fresh run re-charges for
   data you already have. Resume is the cheap, correct default.
+- If a closing line says a step was not started because its cost forecast was more
+  than the budget cap, nothing was charged for that step, and the cap was not
+  reached: the step's forecast, added to what the run had already spent, was over it.
+  Offer the user both remedies and let them choose: raise `budget_caps`, or make the
+  step smaller with the setting the line names (`google_max_items`, `meta_limit_per_source`, `linkedin_max_items`, or fewer `competitor_names` or `seed_terms`).
+  Running the same command on the folder then checks that step again against the new
+  cap or setting. Any line that says something was charged means that money was
+  spent, whatever it says about the cap. A line that says an earlier step was stopped
+  by the budget cap, and that this step did not run, is not a size problem of this
+  step: running the stopped step again runs it too.
+  The Google ads forecast assumes `google_max_items` ads (2000 by default), which
+  can be far more than a small advertiser has. When that forecast alone is over the cap,
+  the tool first runs a small pass of at most 25 ads and goes on to the full search
+  only if that then fits the cap. The pass searches every website the full search
+  would (when that is more websites than one run takes, no pass is made and the step
+  is refused as before). A pass that finishes cleanly with fewer ads than it was
+  allowed is the whole result, and no second run is made. A pass that ends with an
+  error, times out, is aborted or returns an error item is a failed step, not an empty
+  result: it was charged, and the line says so. If the tool stops after a clean pass,
+  the pass was charged, and the line says how many ads it found and about what the
+  full search is estimated to cost.
 - If the tool says it stopped at the spend cap, ask the user first: raising
   `budget_caps` lets the run spend more, so raise it only after they agree to
   the new cap, then resume. Running the tool again on the folder is a new
-  command, and its cap counts from $0 again: tell the user the new cap is what
+  command, and its cap counts from USD 0 again: tell the user the new cap is what
   that command may spend on top of what was already spent. Only if resurrecting
   genuinely fails do you consider alternatives, and say so plainly.
 - When the user says a run was cut off, believe them and resume; don't re-verify
@@ -917,7 +1032,7 @@ them.
 ## Notes
 
 - **Cost:** at the example settings a single-country run is forecast at most about
-  $9.77 for 2 competitors and $11.74 for 3. That is a worst case: a real run is
+  USD 9.77 for 2 competitors and USD 11.74 for 3. That is a worst case: a real run is
   billed for what actually comes back, so it usually costs less. Google is searched in
   batches of 10 pairs of country and website. Each batch is its own run with its own
   cap on ads, and each further batch adds to the forecast. Countries times websites up

@@ -496,19 +496,71 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="config utilities (token persistence).")
     ap.add_argument(
         "--persist-token", action="store_true",
-        help="Save $APIFY_TOKEN into ~/.apify/auth.json so later runs reuse it with "
+        help="Save the Apify token into ~/.apify/auth.json so later runs reuse it with "
              "no re-entry. Reads the token from the APIFY_TOKEN env var -- never the "
-             "command line, so it cannot leak via the process list. (Normal runs also "
-             "persist the token automatically on first use; this is the explicit form.)",
+             "command line, so it cannot leak via the process list. When APIFY_TOKEN is "
+             "not set and a person is at a terminal, it asks for the token (hidden). "
+             "(Normal runs also persist the token automatically on first use; this is "
+             "the explicit form.)",
     )
     _args = ap.parse_args()
     if _args.persist_token:
         _tok = os.environ.get("APIFY_TOKEN", "").strip()
+        if not _tok and sys.stdin.isatty():
+            # Typing `export APIFY_TOKEN=...` into a Terminal writes the token to the shell's
+            # history file in plain text, and a profile edit reaches only windows opened
+            # after it (in a real buyer's run neither was explained). Asked for here, the
+            # token is typed or pasted hidden, so it reaches no history and no process list,
+            # and the window needs no setup. Only when a person is at a terminal: a script or
+            # test with no APIFY_TOKEN and no terminal still gets the sentence further down.
+            import getpass
+            try:
+                _tok = getpass.getpass("Paste your Apify API token (nothing is shown as you "
+                                       "paste), then press Return: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                _tok = ""
+            if not _tok:
+                raise SystemExit("No token was entered, so nothing was saved.")
         if not _tok:
             raise SystemExit(
                 "Set APIFY_TOKEN in the environment first "
-                "(e.g. `export APIFY_TOKEN=...`), then re-run --persist-token."
+                "(not by typing it into Terminal, which keeps it in your shell history), "
+                "or run this command in a Terminal window, where it asks for the token "
+                "hidden and leaves no history. That is Route 1 in the plugin's SETUP.md, "
+                "\"save it once with the plugin's own script\"."
             )
+        # A person who pastes the whole `export APIFY_TOKEN=...` line (it is what the
+        # older instructions had them type) means the value after the "=": take it,
+        # then check its shape. In a real run a sentence typed here was saved and
+        # reported as a success, and every later run failed to sign in. The same check
+        # is made on a token that came from APIFY_TOKEN: in a real run a variable that
+        # held a sentence was saved by this command and reported as "Saved Apify token
+        # ****ence". (Only this explicit save is checked. Using the variable for a run is
+        # a separate decision and is not changed here.)
+        if _tok.startswith("export "):
+            _tok = _tok[len("export "):].strip()
+        if _tok.startswith("APIFY_TOKEN="):
+            _tok = _tok[len("APIFY_TOKEN="):].strip()
+        # A shell line ends in ";" after its closing quote, so the ";" comes off before
+        # the quotes do. Only a matching pair is removed; a stray quote stays and fails
+        # the shape check below.
+        _tok = _tok.rstrip("; \t")
+        if len(_tok) >= 2 and _tok[0] == _tok[-1] and _tok[0] in "\"'":
+            _tok = _tok[1:-1]
+        # Whatever is left must be exactly one token: the prefix once, then only ASCII
+        # letters and digits. A token pasted twice, a trailing ";" or invisible
+        # character, or the bare prefix would otherwise be saved and reported as a
+        # success, and every later run would fail to sign in. Apify's docs give no
+        # length or character set for a token, so the 20-character floor after the
+        # prefix is a deliberately low guard against a truncated paste, not a documented
+        # length; a real token is longer.
+        _body = _tok[len("apify_api_"):]
+        if not (_tok.startswith("apify_api_") and _tok.count("apify_api_") == 1
+                and len(_body) >= 20 and _body.isascii() and _body.isalnum()):
+            raise SystemExit(
+                "That does not look like an Apify API token, so nothing was saved. Your "
+                "token is on the Apify Console under Settings > API & Integrations and "
+                "starts with apify_api_. Run the command again to try again.")
         _p, _outcome = persist_token(_tok)
         if _outcome == "kept":
             raise SystemExit(

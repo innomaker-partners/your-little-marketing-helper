@@ -60,6 +60,7 @@ import postprocess as _PP  # noqa: E402  (the one place the unfinished-step sent
 import ocr as OCR       # noqa: E402
 import selector         # noqa: E402
 import e3_report        # noqa: E402
+import adrecords as AR  # noqa: E402  (ad or scraper status record: one answer for every reader)
 import stages as ST     # noqa: E402  (meta_search_words: the one reading of the words)
 
 
@@ -212,9 +213,48 @@ def _start_charge_notes(workdir, dry_run):
     os.environ[A.CHARGE_NOTES_ENV] = str(p.resolve())
 
 
+def _left_run_notes(notes):
+    """The notes run_phase._note_left_run wrote for runs an earlier command left in a step."""
+    out = []
+    for x in notes:
+        try:
+            d = json.loads(x)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("left_run"):
+            out.append(d)
+    return out
+
+
+def _left_run_sentence(d):
+    """One plain sentence for a run an earlier command left: counted in this total, counted in
+    that earlier command's total instead, or not readable (so the total may be low)."""
+    step, rid = d.get("step") or "one", d.get("left_run")
+    try:
+        usd = float(d.get("usd"))
+    except (TypeError, ValueError):
+        usd = None
+    if d.get("state") == "counted" and usd is not None:
+        if usd <= 0:
+            return ""   # nothing was charged for it, so there is no amount to say is included
+        return (f" This total includes ${usd:.4f} for a run an earlier command left in the "
+                f"{step} step (run {rid}): Apify had already charged it, and it is counted "
+                f"here because this is the run that read it.")
+    if d.get("state") == "earlier":
+        if usd is not None and usd <= 0:
+            return ""
+        how_much = f"charged ${usd:.4f} for it, and that" if usd is not None else "charged for it, which"
+        return (f" The {step} step picked up a run an earlier command left (run {rid}). Apify "
+                f"{how_much} was counted in that earlier command's total, so it is not "
+                f"counted again in this one.")
+    return (f" This may be incomplete: an earlier command left a run in the {step} step "
+            f"(run {rid}) whose charge could not be read, so it is not in this total. You can "
+            f"check it on the Apify console; the run is kept and read again next time.")
+
+
 def _charge_caveat(workdir):
     """" This may be incomplete: ..." when a step's charge was noted as possibly
-    low this run, else ""."""
+    low this run, else ""; then one sentence for each run an earlier command left."""
     try:
         notes = [x for x in (Path(workdir) / _CHARGE_NOTES_NAME).read_text(
             encoding="utf-8").splitlines() if x.strip()]
@@ -222,10 +262,13 @@ def _charge_caveat(workdir):
         return ""
     if not notes:
         return ""
-    n = len(notes)
-    return (f" This may be incomplete: Apify was still recording the charges of {n} "
-            f"paid step{'' if n == 1 else 's'} when the tool stopped waiting, so the "
-            f"real bill can be higher. The exact amount is on the Apify console.")
+    left = _left_run_notes(notes)
+    n = len(notes) - len(left)
+    out = (f" This may be incomplete: Apify was still recording the charges of {n} "
+           f"paid step{'' if n == 1 else 's'} when the tool stopped waiting, so the "
+           f"real bill can be higher. The exact amount is on the Apify console."
+           if n else "")
+    return out + "".join(_left_run_sentence(d) for d in left)
 
 
 # How the closing line names this tool's records and sources (plain words).
@@ -348,7 +391,7 @@ def _start_interactive_ledger(workdir, ceiling, dry_run, force=False):
 
 # What the closing lines need from _main: the run's gap list (the
 # same list object _main records into) and whether the run reached its last step.
-_CLOSING = {"gaps": None, "reached_end": False}
+_CLOSING = {"gaps": None, "said": None, "reached_end": False, "notes": []}
 
 
 def _end_interactive_ledger():
@@ -394,8 +437,17 @@ def _end_interactive_ledger():
     inc_lines = (_incomplete_report_lines(_incomplete_lines(wd), scheduled=False)
                  if _CLOSING["reached_end"] else [])
     kept_lines = [s for _, s in _kept_lines(wd)] if _CLOSING["reached_end"] else []
-    gap_lines = inc_lines + kept_lines + (_gap_lines(_CLOSING["gaps"], complete=not inc_lines)
+    gap_lines = inc_lines + kept_lines + (_gap_lines(_CLOSING["gaps"], complete=not inc_lines,
+                                                      scheduled=False)
                                           if _CLOSING["reached_end"] and _CLOSING["gaps"] else [])
+    # Lines that are not gaps but must be read with the results (a typed website
+    # Google searched although the search found another): after the gaps.
+    gap_lines = gap_lines + (list(_CLOSING["notes"]) if _CLOSING["reached_end"] else [])
+    # What an ad library itself answered is information, not a gap: it follows the gap
+    # lines and changes nothing about whether the run is complete. It comes last because
+    # it carries its own heading, which must not swallow the notes above.
+    if _CLOSING["reached_end"]:
+        gap_lines += _said_lines(_CLOSING.get("said"))
     if gap_lines:
         print("\n" + "\n".join(gap_lines), flush=True)
     print("\n" + line + ("\n" + not_counted if not_counted else ""), flush=True)
@@ -497,6 +549,12 @@ def _check_incomplete(rc, stage, ceiling, workdir):
             f"{_MAY_BE_CHARGED}\n"
             f"Run the tool once manually to fix the error, then re-schedule."
         )
+    elif _stop_entry(workdir, _failed_stage) and _settings_cap_stop(
+            _failed_stage, _fn, _stop_entry(workdir, _failed_stage), ceiling, cost_line):
+        # The cap in the user's settings, lower than the approved ceiling, refused the
+        # step: the notice names that cap, not the ceiling.
+        msg, report = _settings_cap_stop(
+            _failed_stage, _fn, _stop_entry(workdir, _failed_stage), ceiling, cost_line)
     else:
         # budget stop (reason == "budget" or unknown)
         msg = (f"{_sn} stopped: its next step could have taken the run"
@@ -593,6 +651,18 @@ def _record_partial(gaps, name, reason):
     gaps.append((name, str(reason).replace("—", "-").replace("–", "-"), "partial"))
 
 
+def _extend_partial(gaps, name, reason):
+    """Like _record_partial, but when the source already has a partial entry the new
+    reason is added to it (joined with "; ") instead of being dropped. WHY: Meta's
+    entry may already name competitors that were not searched; what the Meta library
+    said about a page it did search belongs in the same line, not nowhere."""
+    for i, g in enumerate(gaps):
+        if len(g) == 3 and g[0] == name:
+            gaps[i] = (name, f"{g[1]}; {reason}", "partial")
+            return
+    _record_partial(gaps, name, reason)
+
+
 # What the notification says when the app index could not be written.
 # WHY this matters beyond the app: _run_completed in repeat.py counts a month
 # only when its frontend_index.json exists, so next month's repeat silently
@@ -608,7 +678,7 @@ def _index_failed_report(workdir):
             f"{Path(workdir).name} (it is free and scrapes nothing again).")
 
 
-def _gap_lines(gaps, complete=True):
+def _gap_lines(gaps, complete=True, scheduled=True):
     """The plain lines that name a run's gaps: sources that returned nothing and
     sources that lost some of their targets, each with its reason.
 
@@ -619,20 +689,37 @@ def _gap_lines(gaps, complete=True):
     reported as one that runs no ads. Empty when the run has no gaps.
 
     complete=False: the run did not finish everything, so the headings
-    do not open with "Run complete"."""
+    do not open with "Run complete".
+    scheduled=False: a run started by hand, which is not a month; the second
+    heading then says "in this run" (a scheduled month keeps "this month")."""
+    when = "this month" if scheduled else "in this run"
     whole = [(g[0], g[1]) for g in gaps if len(g) == 2]
     part = [(g[0], g[1]) for g in gaps if len(g) == 3]
     lines = []
     if whole:
         lines.append("Run complete, but these sources returned nothing this month:" if complete
-                     else "These sources also returned nothing this month:")
+                     else f"These sources also returned nothing {when}:")
         lines += [f"- {n}: {r}." for n, r in whole]
     if part:
-        lines.append("Some of what you asked for is also missing this month:"
+        lines.append(f"Some of what you asked for is also missing {when}:"
                      if whole or not complete
                      else "Run complete, but some of what you asked for is missing this month:")
         lines += [f"- {n}: {r}." for n, r in part]
     return lines
+
+
+def _said_lines(said):
+    """The lines for what an ad library answered about a page, or [] for none.
+
+    WHY apart from _gap_lines: when the Meta library says a page is not currently
+    running ads, it ANSWERED; nothing is missing. Listed with the gaps it made the
+    closing lines say the run was missing something, and the unattended notification
+    stopped saying all steps ran. The statement is still told, attributed to the
+    library, so it cannot be mistaken for the tool's own finding."""
+    said = [s for s in (said or []) if s]
+    if not said:
+        return []
+    return ["What the ad libraries said:"] + [f"- {s}" for s in said]
 
 
 def _aside_message(cands, aside_note, tail):
@@ -654,7 +741,7 @@ def _aside_message(cands, aside_note, tail):
 
 
 def _write_done_notification(workdir, ceiling, gaps, index_failed=False, summary_note=None,
-                             aside_note="", key_warnings=()):
+                             aside_note="", key_warnings=(), said=()):
     """The "done" notification of an unattended run.
 
     With nothing to report, the text is exactly what it always was. Otherwise
@@ -673,8 +760,11 @@ def _write_done_notification(workdir, ceiling, gaps, index_failed=False, summary
         what was found, so the message and the report say so.
       - key_warnings: a "google_advertisers" key in competitors/resolution.json
         that the tool does not read (_key_warnings), in the report only.
+      - said: what an ad library answered about a page (a library saying a page runs
+        no ads). Information, not a gap: it is in the report and leaves
+        "All steps ran successfully." true.
     Never says "All stages ran successfully" unless all of these are empty,
-    except aside_note and key_warnings, which leave that sentence true and are
+    except aside_note, key_warnings and said, which leave that sentence true and are
     said after it.
     """
     cost_line = _total_billed_line(workdir)
@@ -689,6 +779,7 @@ def _write_done_notification(workdir, ceiling, gaps, index_failed=False, summary
                             report=(f"All steps ran successfully.\n"
                                     + (f"{aside_note}\n" if aside_note else "")
                                     + "".join(f"{w}\n" for w in key_warnings)
+                                    + "".join(f"{w}\n" for w in _said_lines(said))
                                     + f"{cost_line}\n"
                                     f"{where}"))
         return
@@ -736,6 +827,7 @@ def _write_done_notification(workdir, ceiling, gaps, index_failed=False, summary
     if aside_note:
         lines.append(aside_note)
     lines += list(key_warnings)
+    lines += _said_lines(said)
     if index_failed:
         lines.append(_index_failed_report(workdir))
     if summary_note:
@@ -788,6 +880,17 @@ def _incomplete_reason(e):
     if kind == "budget_stop" and e.get("part_way"):
         # The cap stopped this step after part of it had run and been
         # charged (run_phase._note_budget_stop), so "it did not run" was untrue.
+        # When the record holds the figures of a refused forecast the cap was not
+        # reached: the cost estimate for the step, with what was spent, was over it, and
+        # the lines say that and offer both remedies (postprocess.stopped_after_part).
+        cause = _PP.stopped_after_part(e)
+        if cause:
+            return (f"it {cause}. Nothing it collected was kept. To finish it, raise "
+                    f"{_PP.raise_what(e)}"
+                    f"{_PP.or_smaller(e)}, and run the same "
+                    "command on this run folder: this step starts again from the beginning "
+                    f"and the part that already ran {_partway_rerun(e)}, while the steps "
+                    "that finished are skipped and not charged again")
         return ("it started, but the run reached the budget cap in your settings "
                 f"(budget_caps) part-way through it. {_partway_charge(e)}, and nothing "
                 "it collected was kept. To finish it, raise the cap and run the same "
@@ -795,9 +898,30 @@ def _incomplete_reason(e):
                 f"and the part that already ran {_partway_rerun(e)}, while the steps "
                 "that finished are skipped and not charged again")
     if kind == "budget_stop":
-        return ("it did not run, because the run reached the budget cap in your settings "
-                "(budget_caps). To run it, raise the cap and run the same command on this "
-                "run folder: the steps that finished are skipped and not charged again")
+        # A step refused on its forecast was never started and nothing was charged for
+        # it; the cap was not reached (in a real buyer's run $0.0362 of $3.00 had been
+        # spent). Both remedies are offered, and what running again does is said: the
+        # step is checked again against the new cap or setting (verified on the fake).
+        later = _PP.later_step_cause(e)
+        if later:
+            # Never priced on its own: an earlier step of this call was stopped, so
+            # this one never started. No size remedy applies to it.
+            return (f"it {later}. Nothing was charged for it, and the steps that "
+                    "finished are skipped and not charged again")
+        cause = _PP.refused_before_start(e)
+        if cause:
+            return (f"it {cause}, so nothing was charged for it. To run it, raise "
+                    f"{_PP.raise_what(e)}"
+                    f"{_PP.or_smaller(e)}, and run the same command "
+                    "on this run folder: this step is checked again against the new cap "
+                    "or setting, and the steps that finished are skipped and not charged "
+                    "again")
+        # A record without figures (written before they were kept, or a stop on spend
+        # already made): words that are true of both.
+        return ("it did not run, because the budget cap in your settings (budget_caps) "
+                "did not allow it. To run it, raise the cap, or make the step smaller, "
+                "and run the same command on this run folder: the steps that finished "
+                "are skipped and not charged again")
     return "a step did not finish"
 
 
@@ -831,12 +955,26 @@ def _earlier_result_reason(e):
                     "may be incomplete. " + keeps + again)
         return ("its latest attempt stopped with an error (the error is in the run log). "
                 + keeps + again)
+    smaller = (f"Raise {_PP.raise_what(e)}"
+               f"{_PP.or_smaller(e)}, first. ")
     if kind == "budget_stop" and e.get("part_way"):
+        cause = _PP.stopped_after_part(e)
+        if cause:
+            return (f"it {cause}. Nothing it collected was kept. "
+                    + keeps + smaller + again)
         return ("it started, but the run reached the budget cap in your settings "
                 f"(budget_caps) part-way through it. {_partway_charge(e)}, and nothing "
                 "it collected was kept. " + keeps + "Raise the cap first. " + again)
-    return ("the run reached the budget cap in your settings (budget_caps) before "
-            "this step. " + keeps + "Raise the cap first. " + again)
+    later = _PP.later_step_cause(e, remedy=False)
+    if later:
+        return (f"its latest attempt {later}, so nothing was charged for it. "
+                + keeps + again)
+    cause = _PP.refused_before_start(e)
+    if cause:
+        return (f"its latest attempt {cause}, so nothing was charged for it. "
+                + keeps + smaller + again)
+    return ("the budget cap in your settings (budget_caps) did not allow this step to "
+            "run. " + keeps + "Raise the cap, or make the step smaller, first. " + again)
 
 
 def _partway_charge(e):
@@ -886,6 +1024,69 @@ def _partway_entry(workdir, stage):
             if isinstance(e, dict) and e.get("kind") == "budget_stop" and e.get("part_way"):
                 return e
     return None
+
+
+def _stop_entry(workdir, stage):
+    """The budget_stop record of this step (part-way or not), or None. Found by the
+    step code each record names, as _partway_entry does."""
+    for p in sorted(Path(workdir).glob("*/" + _RUN_INCOMPLETE_FILE)):
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(doc, dict) or doc.get("stage") != stage:
+            continue
+        for e in doc.get("entries") or []:
+            if isinstance(e, dict) and e.get("kind") == "budget_stop":
+                return dict(e, stage=stage)
+    return None
+
+
+def _settings_cap_stop(stage, name, entry, ceiling, cost_line):
+    """(short message, report) for a scheduled run whose step was stopped by the
+    budget cap in the user's settings, which was lower than the approved ceiling; None
+    when the record does not show that (then the ceiling is the limit in force).
+
+    WHY: run_phase uses the lower of the two as the step's cap. With a cap of 3.00 in
+    the settings and a ceiling of 7.00, the notice named the ceiling, said it had been
+    "approached" and told the user to re-schedule with a higher ceiling: raising the
+    ceiling changes nothing, because the cap in the settings is what refused the step.
+    The notice names that cap, says the ceiling was not reached, and says plainly that
+    every scheduled run will refuse the step the same way (and, when the step takes a
+    small first search first, be charged for it each time) until the cap or the step's
+    size setting changes."""
+    try:
+        cap = float(entry["cap_usd"])
+        ceiling_f = float(ceiling)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not cap < ceiling_f - 1e-9:
+        return None
+    cause = _PP.refused_before_start(entry) or _PP.stopped_after_part(entry)
+    fp = entry.get("first_pass") if isinstance(entry.get("first_pass"), dict) else None
+    try:
+        paid = float(fp.get("charged_usd") or 0.0) if fp else 0.0
+    except (TypeError, ValueError):
+        paid = 0.0
+    msg = (f"{name} stopped: the budget cap in your settings (${B.cap_text(cap)}) refused "
+           f"it. Your approved ${B.cap_text(ceiling_f)} ceiling was not reached.")[:200]
+    again = ("Until the budget cap in your settings "
+             + ("changes" if _PP.minimum_limit(entry) else "or the step's size setting changes")
+             + ", "
+             "every scheduled run refuses this step the same way"
+             + (f" and is charged for its first small search each time (about "
+                f"${paid:.4f})" if paid > 0 else "")
+             + ".")
+    report = (
+        f"{name} stopped before completing because of the budget cap in your settings "
+        f"(budget_caps, ${B.cap_text(cap)}), not the approved ceiling of "
+        f"${B.cap_text(ceiling_f)}, which was not reached.\n"
+        + (f"{name} {cause}.\n" if cause else "")
+        + f"{cost_line}\n{again}\n"
+        f"Raise budget_caps (up to your approved ceiling)"
+        f"{_PP.or_smaller(entry, stage)}, run the tool once by hand, then re-schedule."
+    )
+    return msg, report
 
 
 # run_phase writes this record in a step's folder
@@ -939,6 +1140,21 @@ def _did_not_run(workdir, stage):
         for e in (doc.get("entries") or []))
 
 
+_OTHERS_SEARCHED = " (the others were still searched)"
+
+
+def _others_searched(workdir, stage, dry_run=False):
+    """The clause " (the others were still searched)" when the step ran, "" when
+    it did not. WHY: the lines that name a competitor the step left out were
+    written before the step was called, so they said the others were searched
+    even when the budget refused the whole step, or it failed, and nothing was
+    searched. The record run_phase writes for a step that did not run
+    (_did_not_run, the same one _incomplete_lines reads) is read AFTER the step
+    was called and decides. A dry run searches nothing for anyone, so it keeps the
+    clause: it describes what the run will do."""
+    return "" if (not dry_run and _did_not_run(workdir, stage)) else _OTHERS_SEARCHED
+
+
 def _incomplete_lines(workdir):
     """[(plain stage name, reason)] for every stage record of a step that did
     not finish (run_phase writes <stage>/.run_incomplete.json); [] for none.
@@ -954,7 +1170,10 @@ def _incomplete_lines(workdir):
                                     "could not be read; check the run log"))
             continue
         name = _STAGE_PLAIN.get(doc.get("stage"), doc.get("stage") or "One step")
-        entries = [e if isinstance(e, dict) else {} for e in doc["entries"]
+        # The step's code rides along on each entry, so a stop line can name the
+        # setting that makes that step smaller (postprocess.make_step_smaller).
+        entries = [dict(e, stage=doc.get("stage")) if isinstance(e, dict) else {}
+                   for e in doc["entries"]
                    if not (isinstance(e, dict)
                            and e.get("kind") == "kept_after_failed_attempt")]
         if not entries:
@@ -1050,7 +1269,8 @@ _KEY_WARNING_FILE = (
 
 
 def _write_incomplete_run_notification(workdir, ceiling, inc, gaps, index_failed=False,
-                                       summary_note=None, aside_note="", key_warnings=()):
+                                       summary_note=None, aside_note="", key_warnings=(),
+                                       said=()):
     """The notification of an unattended run that reached its end but did not
     finish everything: status "incomplete", never "done", and never
     the words "Run complete". aside_note: the Google set-aside
@@ -1071,6 +1291,7 @@ def _write_incomplete_run_notification(workdir, ceiling, inc, gaps, index_failed
     if aside_note:
         lines.append(aside_note)
     lines += list(key_warnings)
+    lines += _said_lines(said)
     if index_failed:
         lines.append(_index_failed_report(workdir))
     if summary_note:
@@ -1079,9 +1300,91 @@ def _write_incomplete_run_notification(workdir, ceiling, inc, gaps, index_failed
     _write_notification(workdir, "incomplete", msg, report=report)
 
 
+def _resolution_damage_message(problem):
+    """ONE wording for a competitors/resolution.json that exists but cannot be read in
+    the shape the tool writes (stages.resolution_file_problem), for the console, the
+    dry run and the standing-approval refusal."""
+    return (f"competitors/resolution.json could not be read ({problem}); nothing was "
+            f"looked up or charged and the file was not changed. Fix it, or delete it to "
+            f"look the competitors up again, then run the same command.")
+
+
 def _quoted(items):
     """'a', 'b' -- the user's own setting values, quoted, for a gap reason."""
     return ", ".join(f"'{str(x).strip()}'" for x in items)
+
+
+# The plan states in which the tool cannot tell which website the buyer meant and
+# so searches nothing for the competitors concerned (stages.google_domain_plan).
+_G_STOPS = ("disputed", "domains_unreadable")
+
+
+def _b5_done(workdir):
+    """True when this folder's Google step has finished (its full output exists):
+    the same test run_phase uses to skip a finished step."""
+    return (Path(workdir) / "B5_google_ads" / "run_02_full.json").exists()
+
+
+def _google_dispute_reason(plan, workdir, will_run=False):
+    """The reason (no full stop) for a Google step that could not search a website
+    because competitors/resolution.json and competitors/domains.json disagree (or
+    domains.json could not be read) and the tool cannot tell which the user meant
+    ('' when nothing is disputed).
+
+    ONE wording for the console, the closing lines and the notification. The
+    remedy is "fix `use`, delete domains.json, run the same command": the tool
+    writes domains.json again from `use`. That works in this folder only while
+    its Google step has not run (a finished step is skipped, run_phase._stage_done),
+    so the sentence about a new folder is said only when it is TRUE: when the step
+    has finished, or when other competitors are about to be searched in this run
+    (the step then counts as done; `will_run` says the Google step is about to run in
+    this process). Saying "the search is done" while nothing had run was false: an
+    interactive run that stops at the confirmation step has searched nothing, and the
+    command can simply be run again there."""
+    if plan.get("state") not in _G_STOPS:
+        return ""
+
+    def _skip_clause():
+        if _b5_done(workdir):
+            return (". This folder's Google search has already run, so running the command "
+                    "here skips it: to search the competitors left out, make a new folder "
+                    "from this one with repeat.py prepare and run it there")
+        if will_run and plan["searched"]:
+            return (". After this run this folder's Google search counts as done, so running "
+                    "the command here again skips it: to search the competitors left out, "
+                    "make a new folder from this one with repeat.py prepare and run it there")
+        return ""
+
+    if plan["state"] == "domains_unreadable":
+        return (f"competitors/domains.json could not be read ({plan['error']}); the tool did "
+                f"not search Google and did not change the file. Fix it, or delete it (the "
+                f"tool writes it again from `use` in competitors/resolution.json), then run "
+                f"the same command on this folder" + _skip_clause())
+    skipped = plan["skipped"]
+    searched = set(plan["searched"] or [])
+    others = [d for d in plan["listed"] if d not in searched]
+    if skipped:
+        # Every website domains.json holds that is not searched is named here, so the
+        # sentence does not repeat one of them afterwards as though it were an extra.
+        text = (f"not searched for {_quoted(n for n, _ in skipped)}, because "
+                f"competitors/resolution.json says {', '.join(u for _, u in skipped)} and "
+                f"competitors/domains.json says {', '.join(others) if others else 'nothing for it'}, "
+                f"and the tool cannot tell which is right. Make `use` in "
+                f"competitors/resolution.json the right website and delete "
+                f"competitors/domains.json (the tool writes it again), then run the same "
+                f"command on this folder")
+        return text + _skip_clause()
+    if plan.get("blank"):
+        return (f"not searched for {', '.join(plan['unmatched'])}: `use` is blank for "
+                f"{_quoted(plan['blank'])} in competitors/resolution.json, while "
+                f"competitors/domains.json lists it. To search it, put the right website in "
+                f"`use`; to leave it out, delete competitors/domains.json (the tool writes "
+                f"it again)")
+    return (f"not searched for {', '.join(plan['unmatched'])}: it is in "
+            f"competitors/domains.json, but no competitor in competitors/resolution.json "
+            f"uses it. To search it, add it as a competitor in the settings and run the "
+            f"command again; to drop it from the list, delete competitors/domains.json "
+            f"(the tool writes it again)")
 
 
 def _forecast_since_approval(job, forecast, ceiling):
@@ -1482,6 +1785,12 @@ def _main():
     workdir = Path(args.workdir)
 
     if args.forecast_only:
+        # A damaged resolution.json is named, not a traceback (the same check and words
+        # as the run itself); nothing is written.
+        _fo_damage = ST.resolution_file_problem(workdir / "competitors" / "resolution.json")
+        if _fo_damage:
+            print(_resolution_damage_message(_fo_damage))
+            sys.exit(3)
         _fo_cfg = C.load_config(cfg_path)
         _fo_usd, _ = _this_run_forecast_usd(_fo_cfg, workdir)
         print(json.dumps({"forecast_usd": _fo_usd}))
@@ -1513,7 +1822,7 @@ def _main():
     if cfg.get("_country_listed_twice"):
         # config._read_countries: a repeat is searched, and paid for, once.
         print("  A country listed more than once in your settings is searched once.")
-    print(f"  budget cap  :${B.cap_text(cfg['budget_caps'].get('phase1', 999))}")
+    print(f"  budget cap  : ${B.cap_text(cfg['budget_caps'].get('phase1', 999))}")
 
     # ------------------------------------------------------------------
     # 1b. Standing-approval preflight (FROZEN).
@@ -1528,6 +1837,8 @@ def _main():
     _ledger_path = None  # Run-level spend ledger; initialised below when ceiling is set
     _gaps = []           # (plain source name, plain reason) per source that returned nothing
     _CLOSING["gaps"] = _gaps  # the closing lines name them
+    _said = []           # what an ad library answered (not gaps); told after the gap lines
+    _CLOSING["said"] = _said
     _index_failed = False  # The app index could not be written
 
     # The ad searches this run makes: the config's `stages` allow-list (empty =
@@ -1611,6 +1922,18 @@ def _main():
                                         "was spent.\nRe-schedule this repeat with a ceiling "
                                         "in dollars above zero."))
             sys.exit(3)
+        # A damaged resolution.json is refused here, before the forecast reads it (the
+        # forecast raised on it and the run ended with a traceback and no notification).
+        _damage = ST.resolution_file_problem(workdir / "competitors" / "resolution.json")
+        if _damage:
+            _msg = _resolution_damage_message(_damage)
+            print(f"[REFUSED] {_msg}")
+            _write_notification(
+                workdir, "refused",
+                f"competitors/resolution.json could not be read ({_damage}); nothing was "
+                f"looked up or charged and the file was not changed. Fix or delete it, "
+                f"then re-run.", report=_msg)
+            sys.exit(3)
         _forecast, _ = _this_run_forecast_usd(cfg, workdir)
         print(f"[standing-approval] forecast: ${_forecast:.4f} | ceiling: ${B.cap_text(_ceiling)}")
         if _forecast > _ceiling:
@@ -1670,6 +1993,7 @@ def _main():
 
     seed_terms = cfg.get("seed_terms", [])
     competitor_set: list[str] = []       # chosen `use` domains, for the curation diff
+    _g_plan = None                       # stages.google_domain_plan once entries exist
     entries: list[dict] = []             # resolution entries (identities path)
     resolution_path = comp_dir / "resolution.json"
 
@@ -1678,6 +2002,11 @@ def _main():
     # (name/domain/URL → verified domain + Facebook Page + full LinkedIn name),
     # validated, and shown for confirmation before a cent is spent.
     identities = R.build_identities(cfg)
+    # What reading the lists changed or set aside (a bracket that was not a
+    # website, a social address skipped, a second website for one name): said
+    # here, before anything is resolved, so no competitor changes without a word.
+    for _note in R.competitor_input_notices(cfg):
+        print(f"Note: {_note}")
     _resolution_reused = False  # set below; read by the dry-run's whole-run figure
 
     if identities:
@@ -1688,8 +2017,26 @@ def _main():
         resolution_mismatch = False
 
         if reused:
+            # A file that exists but cannot be read in the shape the tool writes (not
+            # valid JSON, empty, not a list, a `domain` that is not a record, a `use`
+            # that is a list) is the user's damaged edit: said plainly BEFORE anything
+            # is looked up or charged, in every mode, and the file is left as it is.
+            # It used to be read as "the competitor list changed": the competitors
+            # were looked up again (paid) and the buyer's edits overwritten.
+            _damage = ST.resolution_file_problem(resolution_path)
+            if _damage:
+                _msg = _resolution_damage_message(_damage)
+                print(f"⤫ {_msg}")
+                if _ceiling is not None:
+                    _write_notification(
+                        workdir, "refused",
+                        f"competitors/resolution.json could not be read ({_damage}); nothing "
+                        f"was looked up or charged and the file was not changed. Fix or "
+                        f"delete it, then re-run.", report=_msg)
+                    sys.exit(3)
+                return
             stored = _read_json(resolution_path, []) or []
-            match_info = R.check_resolution_match(identities, stored)
+            match_info = R.check_resolution_match(identities, stored, R.supplied_domains(cfg))
             if match_info["match"]:
                 entries = stored
                 print(f"Reusing resolution for {len(entries)} competitor(s) "
@@ -1718,7 +2065,8 @@ def _main():
             print(f"Resolving {len(identities)} competitor(s) via SERP: {identities}")
             for _name, _dom in R.supplied_domains(cfg).items():
                 print(f"  {_name!r} and {_dom!r} are the same company: one competitor, "
-                      f"searched by its name, with {_dom} checked against what the search finds.")
+                      f"searched by its name. {_dom} is the website used for Google; "
+                      f"the report shows what the search finds beside it.")
             # Each competitor gets a small query set (bare + site:facebook.com +
             # site:linkedin.com) so the verified domain, the advertiser Facebook
             # Page, and the full LinkedIn name are each surfaced reliably.
@@ -1732,7 +2080,8 @@ def _main():
                       "competitors/resolution.json + domains.json and show a "
                       "resolution report at this confirmation gate.")
             else:
-                entries = R.resolve_all(identities, workdir, R.supplied_domains(cfg))
+                entries = R.resolve_all(identities, workdir, R.supplied_domains(cfg),
+                                        R.unused_bracket_sites(cfg))
                 # Fill each entry's LinkedIn NUMERIC company id (a free GET of the
                 # public company page) BEFORE writing + reporting. The LI stage
                 # scopes only by numeric id; resolving it here keeps the id inside
@@ -1742,7 +2091,29 @@ def _main():
                 R.write_resolution(entries, workdir)
 
         if entries:
+            # A reused resolution keeps the LinkedIn cause it stored; where the buyer
+            # can have fixed it since (added the page address or the id) or a retry
+            # can succeed, the free id lookup runs again so the report is true.
+            if _resolution_reused and not args.dry_run and R.refresh_linkedin_ids(entries):
+                R.write_entries_only(entries, workdir)
             print(R.format_resolution_report(entries, cfg.get("meta_search_terms")))
+            # Google searches the websites in resolution.json (stages._curated_domains).
+            # Which one wins when the two files differ is decided in one place
+            # (stages.google_domain_plan). A `use` the user edited wins and
+            # domains.json is rewritten to match; a disagreement the tool cannot
+            # settle is said loudly here, searches nothing for the competitors
+            # concerned, and (below) stops an interactive run at the gate.
+            _g_plan = ST.google_domain_plan(workdir)
+            _g_dispute = _google_dispute_reason(_g_plan, workdir)
+            if _g_dispute:
+                print(f"\n\u26a0 Google ads: {_g_dispute}.")
+            elif _g_plan["state"] == "use_wins":
+                print("\nNote: competitors/domains.json listed other websites than `use` in "
+                      "competitors/resolution.json. `use` is the file you edit, so Google "
+                      "searches the websites in it and competitors/domains.json is "
+                      "rewritten to match.")
+            if not args.dry_run:
+                ST.sync_google_domains(workdir, _g_plan)
         competitor_set = [e["domain"]["use"] for e in entries
                           if (e.get("domain") or {}).get("use")]
 
@@ -1751,7 +2122,9 @@ def _main():
         # resolution_confirmed flag and a stale CONFIRMED file cannot count:
         # they were approved for a DIFFERENT set of competitors.  Only an explicit
         # --auto-confirm on this invocation is accepted.
-        if resolution_mismatch:
+        # A Google website dispute the tool cannot settle also needs the user (or a
+        # reviewed --auto-confirm caller, which proceeds without those competitors).
+        if resolution_mismatch or (_g_plan and _g_plan["state"] in _G_STOPS):
             confirmed = args.auto_confirm
         else:
             confirmed = (args.auto_confirm or reused
@@ -1762,9 +2135,12 @@ def _main():
             print("# STOP: resolution complete. Confirm the targets before any spend.")
             print("#" * 64)
             print("Review the RESOLUTION REPORT above, especially any ⚠ lines.")
+            if _g_plan and _g_plan["state"] in _G_STOPS:
+                print("The Google ads line above says the tool cannot tell which website you "
+                      "meant (two files disagree, or competitors/domains.json could not be "
+                      "read): fix it as it says, then re-run.")
             print("If a target is wrong: edit its `use` value in")
-            print("  competitors/resolution.json   (Facebook Page, LinkedIn name)")
-            print("  competitors/domains.json      (the Google verified domain)")
+            print("  competitors/resolution.json   (Google website, Facebook Page, LinkedIn name)")
             print("then re-run. Re-running REUSES this resolution and proceeds to the")
             print("paid Meta / Google / LinkedIn scrapes. A reviewed, non-interactive")
             print("caller may pass --auto-confirm instead.")
@@ -1836,6 +2212,12 @@ def _main():
         return has_page or bool(ST.meta_search_words(cfg))
 
     def _has_google_target():
+        # What Google will actually search (stages.google_domain_plan): a
+        # competitor held back by a file dispute is a resolved competitor but not
+        # a target. With no resolution entries, the chosen domains as before.
+        _pl = ST.google_domain_plan(workdir)
+        if _pl["searched"] is not None:
+            return bool(_pl["searched"])
         return bool(competitor_set)
 
     # ------------------------------------------------------------------
@@ -1868,8 +2250,9 @@ def _main():
         if _meta_no_page and _meta_any_page:
             print(f"  ⤫ Not searched on Meta (no Facebook page): {_quoted(_meta_no_page)}. "
                   "Meta searches the other competitors by their Facebook pages.")
-            _meta_reasons.append(f"{_quoted(_meta_no_page)} has no Facebook page, so it was not "
-                                 f"searched (the others were still searched)")
+            _meta_reasons.append(
+                (f"{_quoted(_meta_no_page)} has no Facebook page, so it was not searched",
+                 _OTHERS_SEARCHED))
             _meta_cov["not_searched"] = list(_meta_no_page)
         elif _meta_no_page and _meta_words:
             _many = len(_meta_no_page) > 1
@@ -1880,23 +2263,26 @@ def _main():
                   f"which finds any advertiser using those words, not "
                   f"{_whose} own ads.")
             _meta_reasons.append(
-                f"{_quoted(_meta_no_page)} {'have' if _many else 'has'} no Facebook page, so "
-                f"{'their' if _many else 'its'} own Meta ads were not searched; Meta was "
-                f"searched by your search words instead ({_quoted(_meta_words)}), which finds "
-                f"any advertiser using those words, not "
-                f"{_whose} own ads")
+                (f"{_quoted(_meta_no_page)} {'have' if _many else 'has'} no Facebook page, so "
+                 f"{'their' if _many else 'its'} own Meta ads were not searched",
+                 f"; Meta was searched by your search words instead ({_quoted(_meta_words)}), "
+                 f"which finds any advertiser using those words, not {_whose} own ads"))
             _meta_cov["not_searched"] = list(_meta_no_page)
             _meta_cov["words_used"] = list(_meta_words)
         if _meta_words and _meta_any_page:
             print(f"  ⤫ Your Meta search words are not used ({_quoted(_meta_words)}): Meta "
                   "searches by Facebook page whenever any competitor has one.")
-            _meta_reasons.append(f"your Meta search words ({_quoted(_meta_words)}) were not "
-                                 f"used, because Meta searches by Facebook page whenever any "
-                                 f"competitor has one")
-        if _meta_reasons:
-            _record_partial(_gaps, _STAGE_PLAIN["B4"], "; ".join(_meta_reasons))
+            _meta_reasons.append(
+                (f"your Meta search words ({_quoted(_meta_words)}) were not "
+                 f"used, because Meta searches by Facebook page whenever any "
+                 f"competitor has one", ""))
         _rc = _run_phase(1, "B4", cfg_path, workdir, dry_run=args.dry_run,
                          run_ceiling_usd=_ceiling, run_ledger_path=_ledger_path)
+        # Recorded after the step, so a claim that Meta ran is made only when it did.
+        _meta_ran = _others_searched(workdir, "B4", args.dry_run) != ""
+        if _meta_reasons:
+            _record_partial(_gaps, _STAGE_PLAIN["B4"], "; ".join(
+                a + (b if _meta_ran else "") for a, b in _meta_reasons))
         _check_incomplete(_rc, "B4", _ceiling, workdir)
     else:
         print(f"  ⤫ Skipping Meta: no competitor has a Facebook page and no Meta search "
@@ -1914,9 +2300,37 @@ def _main():
         meta_items: list[dict] = []
         print("[dry-run] would read B4_meta_ad_library/run_02_full.json")
     else:
-        meta_items = _read_json(meta_path, []) or []
+        # The file keeps every record the scraper returned. A page with no active ads
+        # makes the Meta scraper return one status record ("Ads not found"), which is
+        # not an ad: in a real run it was counted as one here, in the report, in the
+        # app and in the closing lines. adrecords decides, once, for every reader;
+        # what the library said is told to the user instead of being counted.
+        meta_items, _meta_status = AR.split_meta_items(_read_json(meta_path, []) or [])
         print(f"  Loaded {len(meta_items)} Meta ad record(s)")
-        if (not meta_items and _wanted("B4") and (args.dry_run or _has_meta_target())
+        _meta_notes = AR.meta_status_notes(_meta_status, meta_items)
+        if _meta_status:
+            _one = len(_meta_status) == 1
+            print(f"  {len(_meta_status)} status record{'' if _one else 's'} from the Meta "
+                  f"scraper {'is not an ad and is' if _one else 'are not ads and are'} not "
+                  f"counted (the file keeps {'it' if _one else 'them'}):")
+            for _n in _meta_notes:
+                print(f"    {_n['sentence']}")
+            # Where the run has Meta ads, the library's "this page runs no ads" is an
+            # ANSWER, told as information (_said_lines); only an error, whose ads are
+            # unknown, is something missing (a partial gap). With no Meta ad at all,
+            # Meta returned nothing, so the heading says so and every sentence, the
+            # library's own words included, goes into it.
+            if meta_items:
+                _meta_err = "; ".join(_n["reason"] for _n in _meta_notes if _n["kind"] == "error")
+                if _meta_err:
+                    _extend_partial(_gaps, _STAGE_PLAIN["B4"], _meta_err)
+                _said.extend(_n["sentence"] for _n in _meta_notes
+                             if _n["kind"] in ("no_ads", "both"))
+            else:
+                _record_gap(_gaps, _STAGE_PLAIN["B4"],
+                            "; ".join(_n["reason"] for _n in _meta_notes))
+        if (not meta_items and not _meta_status and _wanted("B4")
+                and (args.dry_run or _has_meta_target())
                 and not _did_not_run(workdir, "B4")):
             _q = _quoted(e.get("input", "") for e in entries)
             _maintenance_gap(_gaps, workdir, "B4_meta_ad_library", _STAGE_PLAIN["B4"],
@@ -1931,15 +2345,24 @@ def _main():
     # Creatives this run could not download,
     # across the three platforms, named in one gap line at the end.
     _creatives_tried = [0, 0]  # [slots, failed]
+    _creatives_stopped = []    # platforms whose download ended with an error
     if cfg.get("download_creatives"):
         if args.dry_run:
             print("[dry-run] would call creatives.download_meta_creatives() "
                   "(Meta's image and video links expire, so this runs right after the Meta step)")
         elif meta_items:
-            manifest = creatives.download_meta_creatives(
-                meta_items, str(workdir / "creatives"),
-                prev_creatives_dir=prev_creatives_dir,
-            )
+            # The creatives are an add-on to the ads: an error in their download is told
+            # (below, as a partial gap) and never ends the run that has the ads.
+            try:
+                manifest = creatives.download_meta_creatives(
+                    meta_items, str(workdir / "creatives"),
+                    prev_creatives_dir=prev_creatives_dir,
+                )
+            except Exception as exc:  # noqa: BLE001 - the ads and the report do not depend on it
+                manifest = {}
+                _creatives_stopped.append(f"Meta ({type(exc).__name__}: {exc})")
+                print(f"  The Meta creatives could not be downloaded this run "
+                      f"({type(exc).__name__}: {exc}). The ads and the report are not affected.")
             meta_saved = sum(
                 1 for v in manifest.values() for s in v if not s.startswith("FAILED")
             )
@@ -1973,27 +2396,99 @@ def _main():
     # 6. Google Ads Transparency (B5)
     # ------------------------------------------------------------------
     print("\n--- Google Ads Transparency ---")
+    _g_not_searched = False  # True when the tool itself chose not to search (named, not "0 ads")
     if not _wanted("B5"):
         print("  Google ads are left out by your settings (the `stages` list), so they "
               "are not searched this run.")
-    elif args.dry_run or _has_google_target():
-        # Google ads searches only by confirmed website; the resolution
-        # report flagged these competitors "NOT resolved".
-        _google_lost = [e.get("input", "") for e in entries
-                        if not (e.get("domain") or {}).get("use")]
-        if _google_lost:
-            _record_partial(_gaps, _STAGE_PLAIN["B5"],
-                            f"{_quoted(_google_lost)} has no confirmed website, so it was not "
-                            f"searched (the others were still searched)")
-        _rc = _run_phase(1, "B5", cfg_path, workdir, dry_run=args.dry_run,
-                         run_ceiling_usd=_ceiling, run_ledger_path=_ledger_path)
-        _check_incomplete(_rc, "B5", _ceiling, workdir)
     else:
-        print("  ⤫ No verified competitor domain resolved: skipping Google Ads "
-              "Transparency (it searches ONLY by verified domain). See the "
-              "resolution report for which competitors did not resolve a domain.")
-        _record_gap(_gaps, _STAGE_PLAIN["B5"],
-                    "no competitor has a confirmed website, so it was not searched")
+        # Read the two files again here: this is exactly what B5 will build
+        # (stages._curated_domains reads the same plan), and a file edited or
+        # damaged since the resolution step is seen before any spend.
+        _gp = ST.google_domain_plan(workdir)
+        _g_why = _google_dispute_reason(_gp, workdir, will_run=not args.dry_run)
+        if _gp["state"] == "corrupt":
+            print(f"  ⤫ {_gp['error']} Google ads were not searched.")
+            _g_not_searched = True
+            _record_gap(_gaps, _STAGE_PLAIN["B5"],
+                        "not searched, because " + _gp["error"].rstrip(". "))
+        elif _gp["state"] in _G_STOPS and not _gp["searched"]:
+            # Every competitor is in the dispute: nothing is searched, and the
+            # general "no verified domain" sentence below would be false (the
+            # competitors resolved; it is the two files that disagree).
+            print(f"  ⤫ Google ads: {_g_why}.")
+            _g_not_searched = True
+            _record_gap(_gaps, _STAGE_PLAIN["B5"], _g_why)
+        elif args.dry_run or _has_google_target():
+            # Google ads searches only by confirmed website; the resolution
+            # report flagged these competitors "NOT resolved".
+            _google_lost = [e.get("input", "") for e in entries
+                            if not str((e.get("domain") or {}).get("use") or "").strip()]
+            _g_full = workdir / "B5_google_ads" / "run_02_full.json"
+            _g_had_full = _g_full.exists()
+            _rc = _run_phase(1, "B5", cfg_path, workdir, dry_run=args.dry_run,
+                             run_ceiling_usd=_ceiling, run_ledger_path=_ledger_path)
+            # Recorded after the step: "the others were still searched" only when it ran.
+            _g_parts = ([_g_why] if _g_why else [])
+            if _google_lost:
+                _g_parts.append(f"{_quoted(_google_lost)} has no confirmed website, so it was "
+                                f"not searched"
+                                + _others_searched(workdir, "B5", args.dry_run))
+            if _g_parts:
+                _record_partial(_gaps, _STAGE_PLAIN["B5"], "; ".join(_g_parts))
+            # The full output was saved by THIS run: keep what it was asked to
+            # search beside it (ST.record_google_searched says why).
+            if not args.dry_run and not _g_had_full and _g_full.exists():
+                # The input the batches were built from tells it which websites sat in
+                # a batch whose ads filled maxItems (ST.google_not_reached).
+                try:
+                    _b5_in = ST.build_B5(cfg, str(workdir), test=False)[0]
+                except (ValueError, KeyError, TypeError):
+                    _b5_in = None
+                ST.record_google_searched(workdir, _gp["searched"], _b5_in)
+            _check_incomplete(_rc, "B5", _ceiling, workdir)
+        else:
+            print("  ⤫ No verified competitor domain resolved: skipping Google Ads "
+                  "Transparency (it searches ONLY by verified domain). See the "
+                  "resolution report for which competitors did not resolve a domain.")
+            _record_gap(_gaps, _STAGE_PLAIN["B5"],
+                        "no competitor has a confirmed website, so it was not searched")
+
+    # A typed website that Google searched although the search's best match was
+    # another one is named with the results (closing lines, DATA_DIGEST).
+    # WHAT was searched comes from B5's own record of its runs in this folder
+    # (stages.google_searched_record), never from the plan: after a rerun in a
+    # folder whose Google step had already run, B5 is skipped, and the plan named a
+    # website that was never searched ("Google searched X as you gave it" was false).
+    _site_notes = []
+    if _wanted("B5") and not args.dry_run and not _g_not_searched:
+        _record = ST.google_searched_record(workdir)
+        _site_notes = R.website_note_lines(entries, _record)
+        _unreached = [d for d in ST.google_searched_unreached(workdir)
+                      if d in (_gp["searched"] or [])]
+        _never = [d for d in (_gp["searched"] or [])
+                  if d not in set(_record) and d not in _unreached]
+        # A website with no ads in a batch of searches that filled the Google actor's
+        # limit may never have been reached: it is neither "searched, no ads" nor
+        # "not searched". A closing NOTE (not a gap: no step failed), carried to the
+        # data digest too, so its 0 is not read as a finding. It is never also in
+        # _never, so it never gets the "not searched in this folder" line below.
+        _site_notes = _site_notes + ST.google_unreached_notes(workdir, _gp["searched"] or [])
+        # Only a complete record can say a website was NOT searched: in a folder
+        # from an earlier version a website whose search found no ads is absent
+        # from it too, and saying it was not searched would be false.
+        if _never and ST.google_searched_complete(workdir):
+            _text = (f"Google ads for {', '.join(_never)} were not searched in this folder "
+                     f"(this folder's Google step had already run); make a new folder "
+                     f"from this one with repeat.py prepare, limit its settings to the "
+                     f"Google ads step, and run it there")
+            print(f"  ⤫ {_text}.")
+            _prev = next((i for i, g in enumerate(_gaps)
+                          if len(g) == 3 and g[0] == _STAGE_PLAIN["B5"]), None)
+            if _prev is None:
+                _record_partial(_gaps, _STAGE_PLAIN["B5"], _text)
+            else:
+                _gaps[_prev] = (_gaps[_prev][0], f"{_gaps[_prev][1]}; {_text}", "partial")
+    _CLOSING["notes"] = _site_notes
 
     google_path = workdir / "B5_google_ads" / "run_02_full.json"
     if args.dry_run:
@@ -2017,6 +2512,7 @@ def _main():
         # only when an advertiser was named: an unnamed ad has no name to add.
         if "other" in _g_owner:
             print(f"  {R.GOOGLE_CONFIRM_HOW}")
+            print(f"  {R.GOOGLE_LIST_REMEDY_CONSOLE}")
         google_own = [g for g, v in zip(google_items, _g_owner) if v == "own"]
         # The one sentence the closing lines and the notification use.
         _g_aside_note = R.google_set_aside_sentence(_g_owner)
@@ -2025,6 +2521,8 @@ def _main():
             pass  # left out on purpose: an empty result is not a gap
         elif not google_items and _did_not_run(workdir, "B5"):
             pass  # The closing lines name the step as not finished
+        elif not google_items and _g_not_searched:
+            pass  # not searched, and the step above said why: not an empty result
         elif not google_items and _has_google_target() and _maintenance_gap(
                 _gaps, workdir, "B5_google_ads", _STAGE_PLAIN["B5"],
                 f"Google returned no ads for {_q}", "Google ads",
@@ -2211,10 +2709,25 @@ def _main():
                         "no competitor has a LinkedIn company page, so it was not searched")
         else:
             names = ", ".join(e['linkedin']['use'] for e in li_named)
+            # What the id lookup found out about WHY it has no id (resolve.LI_ID_*):
+            # a page that could not be fetched may work later, a page that was read
+            # and settles nothing will not. An older file does not say.
+            _why = {(e["linkedin"].get("id_lookup") or "") for e in li_named}
+            if _why == {R.LI_ID_FETCH_FAILED}:
+                _cause = ("The company page could not be fetched (it failed or was blocked), "
+                          "so running again later may find the id; or add ")
+            elif _why == {R.LI_ID_PAGE_UNSETTLED}:
+                _cause = ("The company page was read but did not give one company id "
+                          "(LinkedIn sometimes shows a sign-in page instead of the company "
+                          "page), so running again later may find it; or add ")
+            elif _why == {R.LI_ID_NO_PAGE}:
+                _cause = ("The entry has a company name but no company page address, so there "
+                          "was no page to read; add the page address as `url`, or add ")
+            else:
+                _cause = ("The id lookup (public company page) found no single id; add ")
             print(f"  Skipping LinkedIn: resolved a company NAME ({names}) but NO numeric "
                   "company id. The Ad Library scopes only by id, so a scrape now would "
-                  "return the wrong advertiser. The id lookup (public company page) failed "
-                  "or was blocked; add `company_id` to the entry in "
+                  f"return the wrong advertiser. {_cause}`company_id` to the entry in "
                   "competitors/resolution.json and re-run.")
             _record_gap(_gaps, _STAGE_PLAIN["LI"],
                         "the LinkedIn page number of "
@@ -2225,12 +2738,14 @@ def _main():
         # flagged these "NO numeric id", and they are left out while the
         # others are searched.
         _li_no_id = [e["linkedin"]["use"] for e in li_named if e not in li_targets]
+        _rc = _run_phase(1, "LI", cfg_path, workdir, dry_run=args.dry_run,
+                         run_ceiling_usd=_ceiling, run_ledger_path=_ledger_path)
+        # Recorded after the step: "the others were still searched" only when it ran.
         if li_targets and _li_no_id:
             _record_partial(_gaps, _STAGE_PLAIN["LI"],
                             f"the LinkedIn page number of {_quoted(_li_no_id)} could not be "
-                            f"found, so it was not searched (the others were still searched)")
-        _rc = _run_phase(1, "LI", cfg_path, workdir, dry_run=args.dry_run,
-                         run_ceiling_usd=_ceiling, run_ledger_path=_ledger_path)
+                            f"found, so it was not searched"
+                            + _others_searched(workdir, "LI", args.dry_run))
         _check_incomplete(_rc, "LI", _ceiling, workdir)
 
         li_path = workdir / "LI_linkedin_ads" / "run_02_full.json"
@@ -2289,8 +2804,12 @@ def _main():
     # This line says only what the downloads
     # show. It used to add "the ads themselves are all there", which the run
     # never checked (a source can be empty or unsearched in the same month).
+    if _creatives_stopped:
+        _extend_partial(_gaps, "Ad images and videos",
+                        f"the download for {', '.join(_creatives_stopped)} stopped with an error, "
+                        f"so those images and videos are missing from the app")
     if _creatives_tried[1]:
-        _record_partial(_gaps, "Ad images and videos",
+        _extend_partial(_gaps, "Ad images and videos",
                         f"{_creatives_tried[1]} of {_creatives_tried[0]} could not be "
                         f"downloaded (the link failed or has expired), so those images and "
                         f"videos are missing from the app")
@@ -2323,8 +2842,8 @@ def _main():
         _inc_lines = _incomplete_report_lines(_incomplete_lines(workdir), scheduled=False)
         e3_report.assemble_report(workdir, cfg,
                                   gap_lines=_inc_lines + [s for _, s in _kept_lines(workdir)]
-                                  + _gap_lines(_gaps, complete=not _inc_lines),
-                                  meta_coverage=_meta_cov)
+                                  + _gap_lines(_gaps, complete=not _inc_lines, scheduled=False),
+                                  meta_coverage=_meta_cov, website_notes=_site_notes)
         # Normalized index for the Local Viewer. Free, no network; reads only what
         # is already on disk. Never fail the whole run over the index.
         try:
@@ -2348,15 +2867,20 @@ def _main():
             _write_incomplete_run_notification(workdir, _ceiling, _inc, _gaps,
                                                index_failed=_index_failed,
                                                aside_note=_g_aside_note,
-                                               key_warnings=_key_warnings(workdir))
+                                               key_warnings=_key_warnings(workdir),
+                                               said=_said)
             _write_incomplete_marker(workdir, "A step of this scheduled run did not "
                                               "finish; see notification.json.\n")
             sys.exit(4)
         _write_done_notification(workdir, _ceiling, [] if args.dry_run else _gaps,
                                  index_failed=_index_failed,
                                  aside_note="" if args.dry_run else _g_aside_note,
-                                 key_warnings=() if args.dry_run else _key_warnings(workdir))
-    print("=" * 60)
+                                 key_warnings=() if args.dry_run else _key_warnings(workdir),
+                                 said=() if args.dry_run else _said)
+    if not args.dry_run:
+        # A dry run's last lines are the whole-run forecast, which closes with this
+        # same rule (_print_whole_forecast); a second one printed two in a row.
+        print("=" * 60)
     # The run reached its last step: its closing lines name its gaps.
     _CLOSING["reached_end"] = True
 
@@ -2369,6 +2893,12 @@ def _main():
 # the run has stopped on its own: it changes no paid call, no cap and no moment at
 # which the run stops.
 _ATTENDED_STOP_LEAD = "Stopped at the spending cap:"
+# The message for a step the budget gate REFUSED on its forecast before it started. In a real
+# buyer's run $0.0362 of a $3.00 cap had been spent when a $6.00 forecast was refused: the cap
+# was never reached, and "Stopped at the spending cap" said it was. The stage record tells the
+# two apart (_refused_steps), so the message says what the record says.
+_ATTENDED_REFUSED_LEAD = "Not started because the cost forecast did not fit the budget cap:"
+_ATTENDED_LEADS = (_ATTENDED_STOP_LEAD, _ATTENDED_REFUSED_LEAD)
 
 
 def _cap_stopped(workdir):
@@ -2390,6 +2920,41 @@ def _cap_stopped(workdir):
     return False
 
 
+def _refused_steps(workdir):
+    """Plain names of the steps whose stage record says they were never started because
+    their cost forecast did not fit the cap (run_phase's "budget_stop" with the forecast
+    figures and not part_way: postprocess.refused_before_start reads the fields, never the
+    words). A step stopped part-way, or on spend already made, or a scraper run that ended
+    at its cap, is not in the list: for those the cap was reached. A later step that never
+    started because an earlier one was stopped (after_step) takes the earlier step's kind."""
+    kinds, later = {}, []
+    for p in sorted(Path(workdir).glob("*/" + _RUN_INCOMPLETE_FILE)):
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(doc, dict):
+            continue
+        stage = doc.get("stage")
+        for e in doc.get("entries") or []:
+            if not isinstance(e, dict):
+                continue
+            if e.get("kind") == "budget_stop" and e.get("after_step") and not e.get("part_way"):
+                later.append((stage, e.get("after_step")))
+                continue
+            if e.get("kind") == "budget_stop":
+                kind = "refused" if _PP.refused_before_start(e) else "reached"
+            elif e.get("kind") == "run_ended" and e.get("cap_stop"):
+                kind = "reached"
+            else:
+                continue
+            if kinds.get(stage) != "reached":
+                kinds[stage] = kind
+    for stage, after in later:
+        kinds.setdefault(stage, kinds.get(after, "reached"))
+    return [_STAGE_PLAIN.get(s, s or "One step") for s, k in kinds.items() if k == "refused"]
+
+
 def _attended_status_file(workdir):
     """(path, kind, doc) of the folder's notification.json. kind: None when there is
     no file; "ours" when it is the one an attended cap stop wrote (status
@@ -2403,7 +2968,7 @@ def _attended_status_file(workdir):
     except (OSError, ValueError):
         return p, "other", None
     if (isinstance(doc, dict) and doc.get("status") == "incomplete"
-            and str(doc.get("message") or "").startswith(_ATTENDED_STOP_LEAD)):
+            and str(doc.get("message") or "").startswith(_ATTENDED_LEADS)):
         return p, "ours", doc
     return p, "other", doc
 
@@ -2450,10 +3015,20 @@ def _record_attended_stop(workdir):
                       "scheduled run, so it was left as it was.", flush=True)
                 return
             inc = _incomplete_lines(workdir)
-            names = ", ".join(dict.fromkeys(n for n, _ in inc)) or "a step"
+            refused = _refused_steps(workdir)
+            reached = ", ".join(dict.fromkeys(n for n, _ in inc if n not in refused))
+            not_started = ", ".join(dict.fromkeys(n for n, _ in inc if n in refused))
+            if not not_started:
+                message = (f"{_ATTENDED_STOP_LEAD} part of this run did not finish "
+                           f"({reached or 'a step'}).")
+            elif not reached:
+                message = (f"{_ATTENDED_REFUSED_LEAD} part of this run did not finish "
+                           f"({not_started}).")
+            else:
+                message = (f"{_ATTENDED_STOP_LEAD} part of this run did not finish ({reached}). "
+                           f"{_ATTENDED_REFUSED_LEAD} {not_started}.")
             _write_notification(
-                workdir, "incomplete",
-                f"{_ATTENDED_STOP_LEAD} part of this run did not finish ({names}).",
+                workdir, "incomplete", message,
                 report="\n".join(_incomplete_report_lines(inc, scheduled=False)))
             return
         if (not _CLOSING["reached_end"] or _incomplete_lines(workdir)

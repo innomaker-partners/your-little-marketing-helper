@@ -130,6 +130,218 @@ def only_error_items(items):
     return f"the scraper returned only an error and no results{why}"
 
 
+# --- a step stopped by the budget cap, in plain words -------------------------------
+# WHY: a record said only "budget_stop", so the closing lines told the buyer "the run
+# reached the budget cap" and offered one remedy, to raise the cap. In a real buyer's run
+# $0.0362 of a $3.00 cap had been spent when a step whose forecast was $6.00 was refused:
+# the cap was never reached, the forecast was over it, and nothing was charged for the
+# step. run_phase._annotate_budget_stop now keeps the figures in the record
+# (forecast_usd, run_spent_usd, cap_usd; first_pass for a small first search), and these
+# functions say what the record says. A record without them (written before they were
+# kept, or a stop on spend already made) gets no sentence from here: the readers fall
+# back to words that are true of both. "Reached the cap" is left to the stop that is that.
+# The phrases are the cause only, without a subject, so the closing lines, the app and the
+# report can each put their own subject and ending around the same words.
+
+# The setting that makes each step smaller: the remedy beside "raise the cap".
+STEP_SIZE_SETTING = {
+    "B1": "list fewer competitor_names or seed_terms in your settings",
+    "B4": "lower meta_limit_per_source in your settings",
+    "B5": "lower google_max_items in your settings",
+    "LI": "lower linkedin_max_items in your settings",
+}
+
+def _usd_words(x):
+    """A dollar figure the way a stop sentence prints it: two decimals from a dollar up
+    (and for 0), four below, so $0.0362 is not read as $0.04."""
+    x = float(x)
+    return f"${x:.2f}" if x >= 1 or x == 0 else f"${x:.4f}"
+
+
+def budget_figures(e):
+    """(forecast, spent, cap) of a budget_stop record as floats, or None when the record
+    does not carry all three as finite amounts (a stop on spend already made, or a
+    record written before the figures were kept)."""
+    try:
+        f, s, c = (float(e[k]) for k in ("forecast_usd", "run_spent_usd", "cap_usd"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(x != x or x in (float("inf"), float("-inf")) or x < 0 for x in (f, s, c)):
+        return None
+    return f, s, c
+
+
+def make_step_smaller(stage):
+    """The remedy beside "raise the cap", naming the step's own setting when known."""
+    how = STEP_SIZE_SETTING.get(stage)
+    return f"make the step smaller ({how})" if how else "make the step smaller"
+
+
+def minimum_limit(e):
+    """The smallest limit the scraper accepts, in dollars, from a budget_stop record that was
+    written because that limit, not the step's size, did not fit what was left of the cap
+    (run_phase._cap_for); None for every other stop."""
+    try:
+        m = float(e.get("min_usd"))
+    except (TypeError, ValueError):
+        return None
+    return m if m == m and 0 < m < float("inf") else None
+
+
+def _left_words(left, need):
+    """What is left, as a stop sentence prints it: rounded DOWN, never up, with as many
+    decimals as _usd_words gives (more when the shorter figure would read the same as the
+    smallest limit). Rounded to nearest, 0.4996 left of a 0.50 minimum read "less than
+    $0.5000, and only $0.5000 was left", which contradicts itself."""
+    left = max(0.0, float(left))
+    shown = _usd_words(need)
+    for digits in ((2, 4, 6, 8) if left >= 1 else (4, 6, 8)):
+        scale = 10 ** digits
+        text = f"${int(left * scale + 1e-6) / scale:.{digits}f}"
+        if text != shown:
+            return text
+    return text
+
+
+def ceiling_limit(e):
+    """The approved run ceiling, in dollars, from a budget_stop record that run_phase._cap_for
+    wrote because that ceiling (not the budget cap in the settings) was what ran out; None
+    for every other stop."""
+    try:
+        c = float(e.get("ceiling_usd"))
+    except (TypeError, ValueError):
+        return None
+    return c if c == c and 0 < c < float("inf") else None
+
+
+def limit_words(e, cap):
+    """The limit a stop sentence names as the one that ran out: the approved ceiling when the
+    record says so, else the budget cap in the user's settings."""
+    from budget import cap_text
+    ceiling = ceiling_limit(e)
+    if ceiling:
+        return f"your approved ceiling (${cap_text(ceiling)})"
+    return f"the budget cap in your settings (${cap_text(cap)})"
+
+
+def raise_what(e):
+    """What the user raises to get the step started: the approved ceiling when that is what ran
+    out (raising budget_caps would change nothing then), else budget_caps in the settings."""
+    return "the approved ceiling" if ceiling_limit(e) else "budget_caps in your settings"
+
+
+def or_smaller(e, stage=None):
+    """', or make the step smaller (...)' beside 'raise the cap', or '' for a stop caused by the
+    scraper's smallest limit: a smaller step does not lower that limit, so it is not offered."""
+    if minimum_limit(e):
+        return ""
+    return ", or " + make_step_smaller(stage if stage is not None else e.get("stage"))
+
+
+def refused_before_start(e):
+    """Why a step was not started, from its budget_stop record, or None when the record
+    carries no figures: its cost forecast plus what the run had spent is more than the
+    cap. Nothing was launched, so nothing was charged for the step."""
+    fig = budget_figures(e)
+    if not fig or e.get("part_way"):
+        return None
+    from budget import cap_text
+    f, s, c = fig
+    m = minimum_limit(e)
+    if m:
+        return (f"was not started, because the scraper cannot start for less than "
+                f"{_usd_words(m)} (the smallest limit it accepts) and only "
+                f"{_left_words(c - s, m)} of {limit_words(e, c)} was left")
+    return (f"was not started, because its cost forecast (at most {_usd_words(f)}) plus "
+            f"what this run had already spent ({_usd_words(s)}) is more than the budget "
+            f"cap in your settings (${cap_text(c)})")
+
+
+def later_step_cause(e, remedy=True):
+    """Why a step never started, from its budget_stop record, or None when the record
+    does not say an earlier step was stopped first (after_step, written by
+    run_phase._note_budget_stop for the steps that come after the stopped one).
+
+    WHY: those steps were never priced on their own, so "the budget cap did not allow
+    it, raise the cap or make the step smaller" was a size remedy for a step that was
+    never too big. The cause is the earlier step; running that step again, as its own
+    line describes, runs this one too. Nothing was launched, so nothing was charged.
+    remedy=False leaves the remedy clause out, for a step whose folder still holds a
+    finished result: running the folder again skips that step, so it would be untrue."""
+    after = e.get("after_step")
+    if not after or e.get("part_way"):
+        return None
+    import stages as _stages
+    name = (_stages.STAGES.get(str(after)) or {}).get("name") or str(after)
+    why = f"did not run, because an earlier step ({name}) was stopped by the budget cap"
+    return why + ("; running that step again, as described above, runs this one too"
+                  if remedy else "")
+
+
+def stopped_after_part(e):
+    """Why a step stopped part-way, from its budget_stop record, or None when the record
+    carries no forecast (then it was spend already made, and the readers say "reached
+    the budget cap", which is true of that). The part that ran was charged and the cost
+    estimate for the step, worked out from what that part cost, did not fit the cap.
+    That figure is an estimate, not a ceiling, and it is for the step, not for "the
+    rest": the sentence says "about", never "at most". A record with first_pass is a
+    step whose small first search finished: what it found, and what the full search is
+    estimated to cost, are said. The words "found no" are used only when the record
+    says that search succeeded: a first search that failed, timed out or was aborted is
+    a failed step (step_failed), never a budget stop that "found nothing"."""
+    fig = budget_figures(e)
+    if not fig or not e.get("part_way"):
+        return None
+    from budget import cap_text
+    f, s, c = fig
+    cap = limit_words(e, c)
+    m = minimum_limit(e)
+    if m:
+        try:
+            charged = float(e.get("spent_usd") or 0.0)
+        except (TypeError, ValueError):
+            charged = 0.0
+        return (f"started, and the part that ran was charged {_usd_words(charged)}. The next "
+                f"run of it could not start: the scraper cannot start for less than "
+                f"{_usd_words(m)} (the smallest limit it accepts) and only "
+                f"{_left_words(c - s, m)} of {cap} was left, so the rest was not started")
+    fp = e.get("first_pass")
+    if isinstance(fp, dict):
+        try:
+            found, paid = int(fp.get("records") or 0), float(fp.get("charged_usd") or 0.0)
+        except (TypeError, ValueError):
+            found, paid = 0, 0.0
+        # The noun comes from the step that wrote the record, never a fixed word:
+        # a review or keyword step must not be told it found "ads".
+        unit = str(fp.get("unit") or "results")
+        if found:
+            return (f"started with a small first search that found at least {found} "
+                    f"{unit} and was charged {_usd_words(paid)}. From that, the full "
+                    f"search is estimated at about {_usd_words(f)}; with the "
+                    f"{_usd_words(s)} this run had already spent that is more than "
+                    f"{cap}, so the full search was not run")
+        if fp.get("succeeded") is True:
+            return (f"started with a small first search that found no {unit} for the "
+                    f"websites it covered and was charged {_usd_words(paid)}. That says "
+                    f"nothing about the other websites, so the full search is still "
+                    f"priced at up to {_usd_words(f)}, which with the {_usd_words(s)} "
+                    f"this run had already spent is more than {cap}, so the full "
+                    f"search was not run")
+        return (f"started with a small first search that was charged {_usd_words(paid)} "
+                f"and did not give a complete answer, so it says nothing about how many "
+                f"{unit} there are. The full search is priced at up to {_usd_words(f)}, "
+                f"which with the {_usd_words(s)} this run had already spent is more than "
+                f"{cap}, so the full search was not run")
+    try:
+        charged = float(e.get("spent_usd") or 0.0)
+    except (TypeError, ValueError):
+        charged = 0.0
+    return (f"started, and the part that ran was charged {_usd_words(charged)}. Then its "
+            f"cost estimate, worked out from what that part cost (about {_usd_words(f)}), "
+            f"plus what this run had spent by then ({_usd_words(s)}), was more than "
+            f"{cap}, so the rest was not started")
+
+
 def unfinished_steps(workdir):
     """The steps of this run that did not finish, each as one plain sentence:
     [{"step": <name>, "sentence": <text>}] in step order, [] when every step that ran
@@ -176,11 +388,20 @@ def unfinished_steps(workdir):
                      f"then stopped with an error, so what is shown for it comes from that "
                      f"attempt and may be incomplete.")
             else:
-                why = ("stopped with an error" if k.get("was") != "budget_stop" else
-                       "started, but the run reached the budget cap in your settings "
-                       "part-way through it and nothing it collected was kept"
-                       if k.get("part_way") else
-                       "did not run, because the run reached the budget cap in your settings")
+                if k.get("was") != "budget_stop":
+                    why = "stopped with an error"
+                elif k.get("part_way"):
+                    cause = stopped_after_part(k)
+                    why = (f"{cause}, and nothing it collected was kept" if cause else
+                           "started, but the run reached the budget cap in your settings "
+                           "part-way through it and nothing it collected was kept")
+                else:
+                    later = later_step_cause(k)
+                    cause = None if later else refused_before_start(k)
+                    why = (later if later else
+                           f"{cause} (nothing was charged for it)" if cause else
+                           "did not run, because the budget cap in your settings did not "
+                           "allow it")
                 s = (f"{name}: the latest attempt to fetch it again {why}, so the results "
                      f"shown for it were kept from an earlier fetch.")
             out.append({"kept_step": name, "sentence": s})
@@ -192,14 +413,29 @@ def unfinished_steps(workdir):
             s = (f"{name} stopped with an error before it finished, so its results "
                  f"are missing from this run.{missing}{earlier}")
         elif "budget_stop" in by_kind:
-            if by_kind["budget_stop"].get("part_way"):
-                s = (f"{name} started, but the run reached the budget cap in your "
-                     f"settings part-way through it, and nothing it collected was "
-                     f"kept, so its results are missing from this run.{missing}{earlier}")
+            b = by_kind["budget_stop"]
+            if b.get("part_way"):
+                cause = stopped_after_part(b)
+                if cause:
+                    s = (f"{name} {cause}, and nothing it collected was kept, so its "
+                         f"results are missing from this run.{missing}{earlier}")
+                else:
+                    s = (f"{name} started, but the run reached the budget cap in your "
+                         f"settings part-way through it, and nothing it collected was "
+                         f"kept, so its results are missing from this run.{missing}{earlier}")
             else:
-                s = (f"{name} did not run, because the run reached the budget cap in "
-                     f"your settings, so its results are missing from this "
-                     f"run.{missing}{earlier}")
+                later = later_step_cause(b)
+                cause = None if later else refused_before_start(b)
+                if later:
+                    s = (f"{name} {later}. Nothing was charged for it and its results "
+                         f"are missing from this run.{missing}{earlier}")
+                elif cause:
+                    s = (f"{name} {cause}, so nothing was charged for it and its results "
+                         f"are missing from this run.{missing}{earlier}")
+                else:
+                    s = (f"{name} did not run, because the budget cap in your settings "
+                         f"did not allow it, so its results are missing from this "
+                         f"run.{missing}{earlier}")
         elif "run_ended" in by_kind:
             e = by_kind["run_ended"]
             how = _ENDED_HOW.get(str(e.get("status")), "did not finish")

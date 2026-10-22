@@ -46,7 +46,7 @@ set -a; source scripts/.env; set +a
 
 **Option B: the Apify CLI login**
 
-If you have the `apify` CLI installed and have already run `apify login`, the tool reads `~/.apify/auth.json` automatically. Nothing extra is needed.
+If you have the `apify` CLI installed and have already run `apify login`, the tool reads `~/.apify/auth.json` automatically. Nothing extra is needed. (Installing the CLI with `npm install -g apify-cli` needs a recent Node.js; see `docs/SETUP.md`, Route 2.)
 
 **Option C: save an exported token once**
 
@@ -57,7 +57,7 @@ export APIFY_TOKEN=apify_api_your_token_here
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/pain-and-messaging/scripts/config.py --persist-token
 ```
 
-It reads the token from the environment (never as an argument), merges it into `~/.apify/auth.json`, and prints only a masked confirmation. If a different login is already saved there, such as an earlier `apify login`, that login is kept, nothing is saved, and the command says so. Note the Option A `.env` route only applies when you run from a checkout; an installed plugin's folder is read-only.
+It reads the token from the environment (never as an argument), merges it into `~/.apify/auth.json`, and prints only a masked confirmation. If a different login is already saved there, such as an earlier `apify login`, that login is kept, nothing is saved, and the command says so. Note the Option A `.env` route is meant for a checkout; for an installed plugin use Option B or C. In your own terminal `${CLAUDE_PLUGIN_ROOT}` is not set: `docs/SETUP.md` (Route 1) gives a line that finds the plugin folder for you. Do not paste the token into a chat with Claude.
 
 ### Create your config file
 

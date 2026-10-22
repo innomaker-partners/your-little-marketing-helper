@@ -69,6 +69,8 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
+import adrecords as AR  # a scraper status record is not an ad (no creative to fetch)
+
 _TIMEOUT = 20  # seconds per request
 _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -378,11 +380,20 @@ def _meta_creative_urls(snapshot: dict) -> list[tuple[str, str]]:
     results: list[tuple[str, str]] = []
 
     def _add(url, ext):
-        if url and url not in seen:
+        # A link is text. A list, a dict or a number in its place is no link, and
+        # skipping that one field keeps a single malformed record from stopping the
+        # whole download (an unhashable value would also raise in the set below).
+        if isinstance(url, str) and url.strip() and url not in seen:
             seen.add(url)
             results.append((url, ext))
 
-    for card in snapshot.get("cards") or []:
+    def _each(value):
+        """The items of a list field; anything else (a number, a dict, text) has none."""
+        return value if isinstance(value, list) else []
+
+    for card in _each(snapshot.get("cards")):
+        if not isinstance(card, dict):
+            continue  # a card that is not an object has no image to fetch, and must not stop the run
         _add(card.get("original_image_url"), ".jpg")
         # resized_image_url often duplicates original — include anyway so
         # callers can choose; dedup via seen-set handles identical URLs.
@@ -391,13 +402,13 @@ def _meta_creative_urls(snapshot: dict) -> list[tuple[str, str]]:
         _add(card.get("video_sd_url"), ".mp4")
         _add(card.get("video_preview_image_url"), ".jpg")
 
-    for img in snapshot.get("images") or []:
+    for img in _each(snapshot.get("images")):
         if not isinstance(img, dict):
             continue
         _add(img.get("original_image_url"), ".jpg")
         _add(img.get("resized_image_url"), ".jpg")
 
-    for vid in snapshot.get("videos") or []:
+    for vid in _each(snapshot.get("videos")):
         if not isinstance(vid, dict):
             continue
         _add(vid.get("video_hd_url"), ".mp4")
@@ -445,18 +456,29 @@ def download_meta_creatives(
     for record in meta_items:
         if not isinstance(record, dict):
             continue
+        if AR.is_meta_status_record(record):
+            # "Ads not found" for a page with no ads is not an ad: it has no creative,
+            # and it used to get an empty manifest entry under the id "unknown".
+            continue
         ad_id = str(record.get("ad_archive_id", "unknown"))
-        snapshot = record.get("snapshot") or {}
-        urls = _meta_creative_urls(snapshot)
+        snapshot = record.get("snapshot")
+        # One malformed record must never stop the download of the others' creatives
+        # (nor the run): its own slots are marked failed, in the words the closing
+        # lines already count, and every other ad goes on.
+        try:
+            urls = _meta_creative_urls(snapshot if isinstance(snapshot, dict) else {})
 
-        # Reuse identity = (ad_id, slot_i, url_path). We do NOT gate on the
-        # config fingerprint: a changed competitor list still shares the
-        # unchanged competitors' ads, and the URL path check keeps it safe.
-        results = [
-            _slot("meta", ad_id, ad_id, i, url, default_ext, dest_root,
-                  prev_platform_dir, prev_sources, own_sources, sources, reuse_counts)
-            for i, (url, default_ext) in enumerate(urls)
-        ]
+            # Reuse identity = (ad_id, slot_i, url_path). We do NOT gate on the
+            # config fingerprint: a changed competitor list still shares the
+            # unchanged competitors' ads, and the URL path check keeps it safe.
+            results = [
+                _slot("meta", ad_id, ad_id, i, url, default_ext, dest_root,
+                      prev_platform_dir, prev_sources, own_sources, sources, reuse_counts)
+                for i, (url, default_ext) in enumerate(urls)
+            ]
+        except Exception as exc:  # noqa: BLE001 - one record's shape, not the run's problem
+            results = [f"FAILED: the record could not be read ({type(exc).__name__})"]
+            reuse_counts["failed"] += 1
 
         manifest[ad_id] = results
 

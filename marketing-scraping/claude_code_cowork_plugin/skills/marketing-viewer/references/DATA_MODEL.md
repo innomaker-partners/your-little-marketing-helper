@@ -20,6 +20,7 @@ Top-level keys:
 | `snapshots` | pain only: per-source rollups (for example a company's Trustpilot score) |
 | `reports` | the written reports, `{id, title, path}` relative to the run folder |
 | `records` | every scraped item, one envelope each (below) |
+| `source_notes` | ad runs only, present only when a scraper returned a status record instead of an ad (for example the Meta library saying a page is not currently running ads): `{platform, kind, sentence}` per note (`kind` is `no_ads`, the library said the page runs no ads, or `error`, the page's ads are unknown), plus the page it is about when known (`where`, `detail`, `page_id`, `page_name`, `page_slug`, `search`; a page given by number in its address, such as profile.php?id=55 or /p/Name-55/, gives `page_id` and no `page_slug`, and a number at the end of a name is read as an id only when it has at least 10 digits, so /p/Name-2024/ names no page; an id of only zeros is no id, and Facebook's own function addresses such as l.php, sharer.php, hashtag, search, videos or watch name no page; a percent-encoded name is decoded once; `conflict` holds the two page ids when the record's own id and its address disagree, and the note is then tied to no page), which the month-to-month comparison uses. Notes about one address are all kept, and when they disagree about which page it is the comparison reads them as about no page it can name, whichever came first. A "not currently running ads" note for a page that shows ads in the same month, or for an address that ads were also asked for in that month whatever page id those ads carry, is not kept (the library answered both ways, the ads are used, and the closing line names the page id they came from when it differs from the note's). Such a record is not an ad, so it is in no count and has no card in `records`; the raw run file still holds it. Show the sentence as written. |
 
 ### A record (the envelope)
 
@@ -41,7 +42,7 @@ Top-level keys:
 - `tags.formats`: a list, for example `["IMAGE", "CAROUSEL"]`. An ad can count under two
   formats. DYNAMIC means Meta's dynamic creative: several versions, not a swipeable carousel.
 - `tags.active`: `active`, `ended`, or `known_dates` (dates known, status not reported).
-- `data`: `advertiser_name`, `headline`, `cta_text`, `link_url` (landing page), `ad_url`
+- `data`: `advertiser_name`, `page_id` and `page_slug` (Meta: which page an ad belongs to), `headline`, `cta_text`, `link_url` (landing page), `ad_url`
   (the ad in its library), `first_shown`, `last_shown`, `duration_days`, `card_count` and
   `cards` (carousel copy), `display_format`, `publisher_platforms`, `page_like_count`,
   `page_category`, `paid_by` (LinkedIn payer), `audience_selections` (Google targeting),
@@ -218,6 +219,27 @@ can't count which ones are no longer there."). The agent reads this field direct
 `cannot_tell_counts` holds the raw positional-record counts: `gone` is the number of
 positional records in this run, `new` is the number in the baseline. Both are always
 present (zero when the category is not suppressed).
+
+**`library_unknown_now`, `library_unknown_before`, `library_said`** (per-platform, ad runs only,
+each present only when it applies): when a month's `source_notes` say the ad library returned an
+error for a page, that page's ads are unknown that month. Last month's ads from that page are
+not counted as gone (`library_unknown_now`: `[{"uid"}]`, left out of `gone`), and this month's
+ads from a page that errored last month are not counted as new (`library_unknown_before`),
+because a scraper error is not a statement about the page. An ad is tied to a page by its
+page id when both sides carry one (two pages can share a name, so a shared name never
+overrides different ids), else by the address name when both sides carry one (an address
+name belongs to exactly one page, compared without regard to case; two different ones
+are never joined by a shared display name, and the ad is 'cannot tell' when the names
+otherwise look alike), else by the page name. A statement that gives no page id and whose name fits ads of more than one page id (two
+locations sharing a display name) is about no page the comparison can name: those ads are
+'cannot tell', not gone. An ad that cannot be
+tied to a page the library answered for, while a note exists that may be about it (an error,
+or an "Ads not found" that names no page), is left out the same way (the safe direction). When the library said the page is not currently running ads (`no_ads`), its
+earlier ads stay in `gone`, and `library_said` holds the plain sentences that attribute it
+("Meta's ad library says facebook.com/AcmePlumbing is not currently running ads; ..."). The
+same sentences close the `summary`. A platform whose records are in only one month, where the
+other month's library answered with a status message, carries them as `library_said` on its
+`platforms_only_in_one_run` item, in place of "not collected in this run".
 
 **`month_sizes`**: how big each month is, in numbers that add up
 with the change counts. It sits before `by_platform` in the output.

@@ -16,6 +16,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import adrecords as AR  # ad or scraper status record; LinkedIn bands and dates
 import resolve as RS  # google_ad_owners: whose Google ads are the competitors'
 import emit_index as EI  # labelled_set_aside: the set-aside ads the app shows
 import stages as ST  # linkedin_where: the LinkedIn country filter build_LI sends
@@ -50,31 +51,33 @@ def _compute_duration_days(first_shown, last_shown):
     """
     Compute duration in days between firstShownAt and lastShownAt.
 
-    Accepts Unix timestamps (int or numeric str — as returned by the Apify actor)
-    or ISO 8601 date strings. Returns an int or None on parse failure.
-    """
-    def _parse(val):
-        if val is None:
-            return None
-        # Unix timestamp — the actor returns these as strings like "1776832935"
-        try:
-            ts = int(val)
-            return datetime.fromtimestamp(ts, tz=timezone.utc)
-        except (ValueError, TypeError):
-            pass
-        # ISO 8601 (e.g. "2026-04-21T00:00:00.000Z" found in countryStats)
-        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(str(val), fmt).replace(tzinfo=timezone.utc)
-            except ValueError:
-                continue
-        return None
+    Accepts Unix timestamps (int or numeric str — as returned by the Google actor),
+    ISO 8601 date strings, and text dates such as "Sep 14, 2026" (the LinkedIn
+    actor's documented format; adrecords.parse_shown_date). Returns an int or None
+    when either date cannot be read.
 
-    dt_first = _parse(first_shown)
-    dt_last = _parse(last_shown)
+    WHY text dates: only epochs and ISO text were read, so every LinkedIn ad, whose
+    dates are text, silently showed "(unknown)" for its duration, and the ranking
+    that falls back on duration for an ad with no impressions band had nothing to rank by.
+    """
+    dt_first = AR.parse_shown_date(first_shown)
+    dt_last = AR.parse_shown_date(last_shown)
     if dt_first and dt_last and dt_last >= dt_first:
         return (dt_last - dt_first).days
     return None
+
+
+def _t(value, default=""):
+    """A stripped string from any scraped value, `default` when there is no text.
+
+    WHY: `(rec.get(k) or "").strip()` assumes a string. A scraper that sends a number
+    or a list in a text field crashed the whole report step, and with it the
+    DATA_DIGEST, PROMPT and the app's index, for every advertiser in the run."""
+    if isinstance(value, bool) or value is None:
+        return default
+    if isinstance(value, (str, int, float)):
+        return str(value).strip() or default
+    return default
 
 
 def _meta_copy_parts(snapshot):
@@ -92,19 +95,20 @@ def _meta_copy_parts(snapshot):
     body_text = ""
     body = snapshot.get("body")
     if isinstance(body, dict):
-        body_text = (body.get("text") or "").strip()
+        body_text = _t(body.get("text"))
     elif isinstance(body, str):
         body_text = body.strip()
 
     card_lines = []
-    for i, card in enumerate(snapshot.get("cards") or []):
+    cards = snapshot.get("cards")
+    for i, card in enumerate(cards if isinstance(cards, list) else []):
         if not isinstance(card, dict):
             continue
         parts = []
-        t = (card.get("title") or "").strip()
-        b = (card.get("body") or "").strip()
-        cta = (card.get("cta_text") or "").strip()
-        url = (card.get("link_url") or "").strip()
+        t = _t(card.get("title"))
+        b = _t(card.get("body"))
+        cta = _t(card.get("cta_text"))
+        url = _t(card.get("link_url"))
 
         if t:
             parts.append(f"title: {t}")
@@ -259,12 +263,15 @@ def _meta_coverage_prompt(cov):
 # Public API
 # ---------------------------------------------------------------------------
 
-def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None):
+def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None, website_notes=None):
     """
     Assemble the E3 report bundle into <workdir>/report/.
 
     gap_lines: the run's own lines naming its gaps (ad_intel._gap_lines), carried
       into DATA_DIGEST.md word for word; [] or None when the run has none.
+    website_notes: sentences (resolve.website_note_lines) naming a competitor website
+      Google searched as the user typed it although the search's best match was a
+      different one; carried into DATA_DIGEST.md word for word.
     meta_coverage: what the Meta stage searched, as ad_intel decided it:
       {"not_searched": [competitor inputs whose own Meta ads were not searched],
        "words_used": [search words Meta was searched by instead], "any_page": bool}.
@@ -289,7 +296,12 @@ def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None):
     # ------------------------------------------------------------------
     # 1. Read pipeline outputs
     # ------------------------------------------------------------------
-    meta_items = _read_json(workdir / "B4_meta_ad_library" / "run_02_full.json", []) or []
+    # The raw file keeps every record. A status record from the Meta scraper ("Ads not
+    # found" for a page with no ads) is not an ad: it is neither counted nor listed as
+    # one, and what the library said is stated in the Meta section (adrecords).
+    meta_items, _meta_status = AR.split_meta_items(
+        _read_json(workdir / "B4_meta_ad_library" / "run_02_full.json", []) or [])
+    _meta_notes = AR.meta_status_notes(_meta_status)
     google_all = _read_json(workdir / "B5_google_ads" / "run_02_full.json", []) or []
     # Only the competitors' own Google ads go into the digest; the
     # others are counted and named in the Google section (resolve.google_ad_owners).
@@ -346,7 +358,9 @@ def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None):
         "",
         f"Generated : {generated_at}",
         f"Workdir   : {workdir.resolve()}",
-        f"Meta records     : {len(meta_items)}",
+        f"Meta records     : {len(meta_items)}"
+        + (f"  ({len(_meta_status)} status record{'' if len(_meta_status) == 1 else 's'} "
+           f"from the scraper not counted, see the Meta section)" if _meta_status else ""),
         f"Google records   : {len(google_items)}"
         + (f"  ({len(google_all) - len(google_items)} more set aside, see the Google section)"
            if len(google_all) > len(google_items) else ""),
@@ -360,6 +374,8 @@ def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None):
         lines += list(gap_lines)
         lines += ["", "A source or competitor named here is a gap in what the tool collected,",
                   "not a fact about the market.", "", "---", ""]
+    if website_notes:
+        lines += ["## Competitor websites to check", ""] + list(website_notes) + ["", "---", ""]
     lines += _meta_coverage_digest(meta_coverage)
 
     # ---- Meta (B4) ---------------------------------------------------
@@ -371,17 +387,25 @@ def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None):
     ]
 
     if not meta_items:
-        lines.append("_(no Meta records found)_")
+        # "None found" is true only where the library said so; after a scraper error
+        # the ads are unknown, which is not the same and must not read as a zero.
+        if any(n["kind"] == "error" for n in _meta_notes):
+            lines.append("_(no Meta ads came back: the scraper returned an error, so the "
+                         "ads are unknown)_")
+        else:
+            lines.append("_(no Meta ads found)_" if _meta_notes
+                         else "_(no Meta records found)_")
         lines.append("")
     else:
         for rec in meta_items:
             if not isinstance(rec, dict):
                 continue
             ad_id = str(rec.get("ad_archive_id") or "unknown")
-            snap = rec.get("snapshot") or {}
-            page_name = (snap.get("page_name") or "(no name)").strip()
+            snap = rec.get("snapshot")
+            snap = snap if isinstance(snap, dict) else {}
+            page_name = _t(snap.get("page_name"), "(no name)")
             body_text, card_lines = _meta_copy_parts(snap)
-            top_cta = (snap.get("cta_text") or "").strip()
+            top_cta = _t(snap.get("cta_text"))
 
             creatives_saved = [
                 f for f in (meta_manifest.get(ad_id) or [])
@@ -400,6 +424,13 @@ def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None):
             else:
                 lines.append("**Creatives:** (none saved / no manifest entry)")
             lines.append("")
+
+    if _meta_notes:
+        # What the Meta scraper itself said about a page or search. Attributed to the
+        # library, in the scraper's words, never turned into a statement about the market.
+        lines += ["**What the Meta ad library said (scraper status records, not ads):**", ""]
+        lines += [f"- {n['sentence']}" for n in _meta_notes]
+        lines += [""]
 
     # ---- Google (B5) ------------------------------------------------
     lines += [
@@ -444,8 +475,8 @@ def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None):
         for i, rec in enumerate(google_items, 1):
             if not isinstance(rec, dict):
                 continue
-            advertiser = (rec.get("advertiserName") or "(none)").strip()
-            fmt = (rec.get("format") or "(none)").strip()
+            advertiser = _t(rec.get("advertiserName"), "(none)")
+            fmt = _t(rec.get("format"), "(none)")
             creative_id = str(rec.get("creativeId") or "unknown")
             duration = _compute_duration_days(
                 rec.get("firstShownAt"), rec.get("lastShownAt")
@@ -473,10 +504,11 @@ def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None):
         "",
         "## LinkedIn Ad Library",
         "",
-        ("Real impression counts where LinkedIn reports them: "
-         "a direct performance signal unavailable from Google. "
-         "Ads ranked by impressions descending within each advertiser; "
-         "falls back to duration when impressions are null (common for VIDEO ads). "
+        ("LinkedIn reports impressions as a band (for example 5k-10k), not an exact "
+         "count, and only for some ads (many VIDEO ads have none). Bands are shown "
+         "here exactly as LinkedIn gives them. Within each advertiser, ads with a band "
+         "are listed first, ordered by the top of the band, highest first; ads with no "
+         "band follow, ordered by duration. "
          "Duration = days from the first to the last day LinkedIn showed the ad."),
         "",
     ]
@@ -502,15 +534,19 @@ def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None):
         for rec in li_items:
             if not isinstance(rec, dict):
                 continue
-            name = (rec.get("advertiserName") or "(unknown)").strip()
+            name = _t(rec.get("advertiserName"), "(unknown)")
             if name not in by_advertiser:
                 by_advertiser[name] = []
             by_advertiser[name].append(rec)
 
         def _li_sort_key(rec):
-            imp = rec.get("totalImpressionsMax")
+            # LinkedIn gives impressions as a BAND string ("5k-10k"); int() of it
+            # raised ValueError in a real run and the whole report step was lost.
+            # A band sorts by its top end; anything unreadable counts as "no
+            # impressions" and the ad is ranked by duration instead.
+            _shown, imp = AR.impression_value(rec.get("totalImpressionsMax"))
             if imp is not None:
-                return (1, int(imp))  # prefer impressions signal
+                return (1, imp)  # prefer impressions signal
             days = _compute_duration_days(
                 rec.get("firstShownAt"), rec.get("lastShownAt")
             )
@@ -522,7 +558,7 @@ def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None):
             lines.append("")
             lines.append(
                 "| # | Ad ID | Headline | Body (snippet) | Format "
-                "| Duration | Impressions (max) | Creative files |"
+                "| Duration | Impressions (LinkedIn's band) | Creative files |"
             )
             lines.append(
                 "|---|-------|---------|----------------|--------"
@@ -530,18 +566,19 @@ def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None):
             )
             for i, rec in enumerate(ads_sorted, 1):
                 ad_id = str(rec.get("adId") or "unknown")
-                headline = _cell(rec.get("headline") or "(none)")
+                headline = _cell(_t(rec.get("headline"), "(none)"))
                 # Flatten newlines — LinkedIn body copy contains \n; raw newlines
                 # break Markdown table rows.
-                raw_body = (rec.get("body") or "").replace("\n", " ").replace("\r", "")
+                raw_body = _t(rec.get("body")).replace("\n", " ").replace("\r", "")
                 body_snippet = _cell(_truncate(raw_body, 120))
-                fmt = _cell(rec.get("format") or "(none)")
+                fmt = _cell(_t(rec.get("format"), "(none)"))
                 dur_days = _compute_duration_days(
                     rec.get("firstShownAt"), rec.get("lastShownAt")
                 )
                 duration_str = f"{dur_days} days" if dur_days is not None else "(unknown)"
-                imp_max = rec.get("totalImpressionsMax")
-                imp_str = f"{imp_max:,}" if imp_max is not None else "(n/a)"
+                # The band as LinkedIn gave it; never a single made-up number.
+                imp_shown, _imp_sort = AR.impression_value(rec.get("totalImpressionsMax"))
+                imp_str = _cell(imp_shown) if imp_shown is not None else "(n/a)"
                 li_creatives_saved = [
                     f for f in (li_manifest.get(ad_id) or [])
                     if isinstance(f, str) and not f.startswith("FAILED")
@@ -583,8 +620,8 @@ def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None):
         "2. **DATA_DIGEST.md**, a data export: every Meta ad with its copy and creative",
         "   filenames; every Google ad with advertiser, format, run-duration (days),",
         "   OCR'd copy, and creative filenames; every LinkedIn ad with advertiser,",
-        "   headline, body snippet, format, duration, real impression counts, and",
-        "   creative filenames.",
+        "   headline, body snippet, format, duration, impression bands as LinkedIn",
+        "   reports them (not exact counts), and creative filenames.",
         "3. **creatives/**, the downloaded ad images/videos, named as in DATA_DIGEST.md.",
         "",
         "**Your task:** write the creative angle report by filling the template's sections from the data.",
@@ -596,7 +633,7 @@ def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None):
         "  fear/pain, aspiration, novelty, authority, etc.). Label A–H. Per angle: frequency",
         "  (% of ads), one verbatim example, which advertisers use it.",
         "- **Section 2 (Duration-weighted ranking):** use the Google duration column and",
-        "  LinkedIn impression counts (where LinkedIn reports them).",
+        "  LinkedIn impression bands (such as 5k-10k, where LinkedIn reports them).",
         "  Longer-running ads signal a tested, profitable angle. Rank angles by average",
         "  duration across ads using them. Note weak signals (long span, tiny creative count).",
         "- **Section 3 (Platform comparison):** Meta vs Google vs LinkedIn.",
@@ -619,6 +656,16 @@ def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None):
         "cite durations. Do not invent data not present in DATA_DIGEST.md.",
     ]
     prompt_lines += _meta_coverage_prompt(meta_coverage)
+    if _meta_notes:
+        prompt_lines += [
+            "",
+            "**What the Meta ad library said (read this before writing anything about Meta).**",
+            "DATA_DIGEST.md, in the Meta section, lists what the Meta scraper itself said about",
+            "pages it searched: either that the library says a page is not currently running",
+            "ads, or that it returned an error, so that page's ads are unknown. You may repeat",
+            "the first only as the library's statement about that page. Never turn either into",
+            "a claim about the market, and never treat an error as \"no ads\".",
+        ]
     if google_aside:
         prompt_lines += [
             "",
@@ -644,7 +691,9 @@ def assemble_report(workdir, cfg, gap_lines=None, meta_coverage=None):
     # 5. Summary line
     # ------------------------------------------------------------------
     print(
-        f"Report bundle assembled: {len(meta_items)} Meta ads, "
+        f"Report bundle assembled: {len(meta_items)} Meta ads"
+        + (f" ({len(_meta_status)} scraper status record{'' if len(_meta_status) == 1 else 's'}"
+           f" not counted)" if _meta_status else "") + ", "
         f"{len(google_items)} Google ads, {len(li_items)} LinkedIn ads "
         f"→ {report_dir.resolve()}"
     )

@@ -22,6 +22,7 @@ Public API:
 import json
 import os
 from pathlib import Path
+from urllib.parse import unquote
 
 # Keys excluded from settings comparison (they change per-run by design, not
 # by the user changing the research scope).
@@ -405,6 +406,436 @@ def _domains_ranked(serp_by_uid, keyword_uids):
     return out
 
 
+# --------------------------------------------------------------------------
+# What a source's own library said about a page (index "source_notes")
+# --------------------------------------------------------------------------
+# WHY: the Meta scraper answers a page it cannot show ads for with ONE status item
+# instead of ads: "Ads not found" (the library itself says the page is not running
+# ads) or an error (rate limited, blocked, page not found: the ads are UNKNOWN). The
+# ad tool keeps those items out of the records and writes them to the index as
+# "source_notes" (emit_index). A comparison that only reads records saw a month with
+# no ads from that page and called last month's ads "no longer there": for an ERROR
+# that is a false statement, because the tool never learned what the page runs. So:
+#   - an error this month for a page: last month's ads from that page are "cannot
+#     tell", not "gone" (and the mirror: an error last month for a page, this
+#     month's ads from it are "cannot tell", not "new");
+#   - "Ads not found" for a page: the library said so, so last month's ads from it
+#     really are no longer running; counted as gone, with the library's statement
+#     attributed to it.
+# An ad is tied to a page by the page fields the index carries (data.page_id,
+# data.page_slug, data.advertiser_name). When BOTH sides carry a page id the ids decide:
+# two pages can share a name (and a name match must never turn page 55's error into a
+# statement about page 77). Where an ad cannot be tied to a page the library answered
+# for, and any note exists that cannot be tied to some other page (an error, or an
+# "Ads not found" with no page named), the ad is "cannot tell" too. That is the safe
+# direction: "no longer there" is a statement about a competitor's market and a false one
+# is worse than a visible "cannot tell".
+
+def _alnum(value):
+    """Lower-case letters and digits only, so 'Acme Plumbing' and 'AcmePlumbing' meet."""
+    return "".join(ch for ch in value.lower() if ch.isalnum()) if isinstance(value, str) else ""
+
+
+def _source_notes(index):
+    """{platform: [note, ...]} for an index's source_notes (emit_index), unreadable
+    entries skipped. Each note has kind "no_ads" | "error" and the page fields."""
+    out = {}
+    raw = index.get("source_notes") if isinstance(index, dict) else None
+    for n in raw if isinstance(raw, list) else []:
+        if (isinstance(n, dict) and n.get("kind") in ("no_ads", "error")
+                and isinstance(n.get("platform"), str) and n["platform"]):
+            out.setdefault(n["platform"], []).append(n)
+    return out
+
+
+# First parts of a Facebook address that are no page's name (its own functions, and the
+# address forms that give a page by number), in letters and digits only. Applied to the
+# address names of notes and of indexed ads, never to an advertiser's own name.
+_NOT_A_NAME = frozenset("".join(ch for ch in x if ch.isalnum()) for x in (
+    "profile.php", "pages", "people", "p", "pg", "groups", "public", "watch", "ads", "share",
+    "sharer", "sharer.php", "permalink.php", "story.php", "photo", "photo.php", "photos",
+    "events", "marketplace", "login", "login.php", "l.php", "hashtag", "search", "business",
+    "reel", "reels", "video", "videos", "video.php", "notes", "media", "home.php", "help",
+    "policies", "settings", "gaming", "dialog", "plugins", "tr", "privacy", "about", "careers",
+    "stories", "live", "fundraisers", "messages", "notifications", "friends", "bookmarks",
+    "saved", "recover", "checkpoint", "flx", "ajax", "api", "connect", "offers", "jobs",
+    "learn", "terms", "oauth", "whatsapp", "instagram", "index.php", "ads_manager"))
+
+
+def _id_key(value):
+    """A page id as one comparable string: whole digits with leading zeros dropped ('055'
+    is page 55); an id of only zeros is no id ('' for it and for none)."""
+    if value in (None, "") or isinstance(value, bool):
+        return ""
+    s = str(value).strip()
+    return s.lstrip("0") if s.isdigit() else s
+
+
+def _forms(value):
+    """The comparable forms of an address name: letters and digits only, as it is and
+    percent-decoded once more. An address that went through a second encoding step reads
+    'Acme%2520Plumbing' after the one decode that is done on reading; the form decoded
+    once more is only ever compared for equality, never shown or used as the name."""
+    return {_alnum(value), _alnum(unquote(value) if isinstance(value, str) else value)} - {""} - _NOT_A_NAME
+
+
+def _rec_page(rec):
+    """({page ids}, {page names, alphanumeric}) an index record carries."""
+    data = rec.get("data") if isinstance(rec.get("data"), dict) else {}
+    tags = rec.get("tags") if isinstance(rec.get("tags"), dict) else {}
+    ids = {_id_key(data.get("page_id"))} - {""}
+    names = {_alnum(data.get("advertiser_name")), _alnum(tags.get("advertiser"))}
+    names |= _forms(data.get("page_slug"))
+    return ids, names - {""}
+
+
+def _rec_slugs(rec):
+    """{forms of the address name} an index record carries (data.page_slug)."""
+    data = rec.get("data") if isinstance(rec.get("data"), dict) else {}
+    return _forms(data.get("page_slug"))
+
+
+def _relation(ids, names, slugs, o_ids, o_names, o_slugs):
+    """How two descriptions of a page relate: "same", "differs" or "other".
+    Page ids decide when both carry one (a shared name counts for nothing). Else address
+    names decide when both carry one: an address name belongs to exactly one page, so two
+    different ones are two pages and a shared display name must not join them. Where the
+    address names differ but the names otherwise look alike the relation is "differs":
+    the tool cannot say whether it is one page under two addresses (a renamed page) or
+    two pages, so it says "cannot tell". With an address name on only one side a shared
+    name decides. (ad-intelligence/scripts/adrecords.py page_relation is the same rule for
+    raw ads; a recurring test keeps the two in step.)"""
+    if ids and o_ids:
+        return "same" if ids & o_ids else "other"
+    if slugs and o_slugs:
+        if slugs & o_slugs:
+            return "same"
+        return "differs" if names & o_names else "other"
+    return "same" if names & o_names else "other"
+
+
+def _note_view(note):
+    n_ids = {_id_key(note.get("page_id"))} - {""}
+    n_slugs = _forms(note.get("page_slug"))
+    n_names = (n_slugs | {_alnum(note.get("page_name"))}) - {""} - _NOT_A_NAME
+    return n_ids, n_names, n_slugs
+
+
+def _note_relation(note, rec):
+    """"same" | "differs" | "other": the page a note is about, against a record's page."""
+    if note.get("search"):
+        return "other"          # a keyword search belongs to no one page
+    ids, names = _rec_page(rec)
+    n_ids, n_names, n_slugs = _note_view(note)
+    return _relation(ids, names, _rec_slugs(rec), n_ids, n_names, n_slugs)
+
+
+def _note_matches(note, rec):
+    """True when the page a note is about is the page of this record."""
+    return _note_relation(note, rec) == "same"
+
+
+def _placed(note):
+    """True when a note says which page it is about (a page id, address name or page
+    name) without contradicting itself. A note that does not is about some page the
+    index cannot name."""
+    if note.get("search") or note.get("conflict"):
+        return False
+    n_ids, n_names, _slugs = _note_view(note)
+    return bool(n_ids or n_names)
+
+
+def _unplaced(notes):
+    """The notes that may be about ANY page: every error (an error is about whichever
+    page was asked, and one that matched no ad may still be that ad's page) and every
+    "Ads not found" that names no page. Keyword-search notes belong to no page."""
+    return [n for n in notes if n.get("kind") == "error"
+            or (n.get("kind") == "no_ads" and not n.get("search") and not _placed(n))]
+
+
+def _page_was_answered(rec, pool):
+    """True when the other month (pool: its real records) holds an ad from the page of
+    this record, i.e. the library did answer for that page."""
+    ids, names = _rec_page(rec)
+    if not ids and not names:
+        return False
+    slugs = _rec_slugs(rec)
+    for other in pool:
+        o_ids, o_names = _rec_page(other)
+        if _relation(ids, names, slugs, o_ids, o_names, _rec_slugs(other)) == "same":
+            return True
+    return False
+
+
+def _signature(note):
+    """Which page a note says it is about: (id, address name, page name, contradiction)."""
+    return (_id_key(note.get("page_id")), _alnum(note.get("page_slug")),
+            _alnum(note.get("page_name")), tuple(note.get("conflict") or ()))
+
+
+def _settle(notes):
+    """Notes about the same address (same kind, same place) that do not say the same
+    thing about which page it is disagree. They are all read as 'about no page we can
+    name', whichever came first: the answer then cannot depend on the order the scraper
+    returned them in."""
+    sigs = {}
+    for n in notes:
+        w = n.get("where")
+        if w and w != "a page the scraper did not name" and not n.get("search"):
+            sigs.setdefault((n.get("kind"), w), set()).add(_signature(n))
+    out = []
+    for n in notes:
+        if len(sigs.get((n.get("kind"), n.get("where")), ())) > 1:
+            n = dict(n, page_id="", page_slug="", page_name="", conflict=None, disputed=True)
+        out.append(n)
+    return out
+
+
+def _read_through_notes(recs, notes, pool, universe=()):
+    """Sort records with no counterpart in the other month by what that month's library
+    said. Returns (stated, unknown): stated = [(rec, note)] whose page the library said
+    runs no ads; unknown = [(rec, note or None)] whose page it errored on, or that a
+    statement could be about but cannot be tied to (note None when the record could not
+    be tied to a page the library answered for and a note exists that may be about it:
+    see _unplaced). Every other record is in neither: no note says anything about it.
+
+    pool: the other month's real records. A page that shows ads in it answered, so a
+    statement 'this page runs no ads' is not used for it (the ads win).
+    universe: every record of that platform in the month the records are from. A
+    statement that gives no page id and whose name fits ads of more than one page (two
+    franchise locations sharing one display name) is about no page we can name: its
+    ads are 'cannot tell'."""
+    notes = _settle(notes)
+    errors = [n for n in notes if n.get("kind") == "error"]
+    loose = _unplaced(notes)
+    ambiguous = {}
+    for n in notes:
+        if n.get("kind") == "no_ads" and _placed(n) and not _id_key(n.get("page_id")):
+            ids = set()
+            for u in list(universe) + list(recs):
+                if _note_matches(n, u):
+                    ids |= _rec_page(u)[0]
+            if len(ids) > 1:
+                ambiguous[id(n)] = dict(n, ambiguous=sorted(ids))
+    by_where = lambda n: (n.get("where") or "", id(n))   # noqa: E731
+    no_ads = sorted((n for n in notes if n.get("kind") == "no_ads" and _placed(n)), key=by_where)
+    differs = {}
+    stated, unknown = [], []
+    for rec in recs:
+        hits = sorted((n for n in errors if _note_matches(n, rec)), key=by_where)
+        if hits:
+            unknown.append((rec, hits[0]))
+            continue
+        said = sorted((n for n in notes if n.get("kind") == "no_ads" and _note_matches(n, rec)),
+                      key=by_where)
+        if said:
+            if _page_was_answered(rec, pool):
+                continue                       # the page shows ads: the ads win
+            amb = next((ambiguous[id(n)] for n in said if id(n) in ambiguous), None)
+            if amb is not None:
+                unknown.append((rec, amb))
+            else:
+                stated.append((rec, said[0]))
+        elif not _page_was_answered(rec, pool):
+            doubt = next((n for n in no_ads if _note_relation(n, rec) == "differs"), None)
+            if doubt is not None:
+                if id(doubt) not in differs:
+                    differs[id(doubt)] = dict(doubt, differs=True)
+                unknown.append((rec, differs[id(doubt)]))
+            elif loose:
+                unknown.append((rec, None))
+    return stated, unknown
+
+
+def _where(note):
+    return note.get("where") or note.get("page_name") or "a page"
+
+
+def _named(notes):
+    """' (a, b and 2 more)' naming the pages of some notes, or '' when none of them
+    names its page (a note the scraper gave no address for says nothing to name)."""
+    names = []
+    for x in notes:
+        w = x.get("where")
+        if w and w != "a page the scraper did not name" and w not in names:
+            names.append(w)
+    if not names:
+        return ""
+    return " (" + ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "") + ")"
+
+
+def _library_sentences(tool, platform, stated, unknown, notes, side, rest=0, only=False,
+                       rest_recs=()):
+    """The plain sentences for what the library said, one per page (and one for ads that
+    could not be tied to a page). side "gone": the notes are THIS month's and the records
+    are the previous month's ads missing this month; side "new": the notes are the
+    previous month's and the records are this month's ads missing then.
+    rest: records no note says anything about (only said for a platform that has
+    nothing else to be compared with).
+    rest_recs: those records, to tell whether the page the library answered for is
+    certainly another page (page ids on both sides and none shared) or only one the tool
+    could not tie to theirs (a page's address name often differs from its display name).
+    only: the platform has no ads in the other month, so none of these are in the
+    counts; the sentence says so, so "5 ads are no longer running" is not read next to
+    "0 ads are no longer there" as a contradiction."""
+    label = _plat_name(platform) or "The source"
+    noun = lambda n: _rec_noun(tool, n)          # noqa: E731
+    notes = _settle(notes)
+    out = []
+
+    def group(pairs):
+        by = {}
+        for rec, note in pairs:
+            by.setdefault(id(note) if note is not None else 0, [note, 0])[1] += 1
+        return list(by.values())
+
+    for note, n in group(stated):
+        if side == "gone":
+            out.append(f"{label}'s ad library says {_where(note)} is not currently running "
+                       f"ads; its {n} {noun(n)} from the previous month "
+                       f"{_plural(n, 'is', 'are')} no longer running.")
+        else:
+            out.append(f"In the previous month {label}'s ad library said {_where(note)} was "
+                       f"not running ads; its {n} {noun(n)} shown this month "
+                       f"{_plural(n, 'is', 'are')} new.")
+    for note, n in group(unknown):
+        if note is not None and note.get("ambiguous"):
+            ids = note["ambiguous"]
+            which = (", ".join(ids[:3]) + (f" and {len(ids) - 3} more" if len(ids) > 3 else ""))
+            if side == "gone":
+                out.append(f"{label}'s ad library said {_where(note)} is not currently running "
+                           f"ads, but that address fits ads from more than one page (page ids "
+                           f"{which}); {n} {label} {noun(n)} from the previous month "
+                           f"{_plural(n, 'is', 'are')} left out of the count of those no longer "
+                           f"there: it is not known which page the library meant.")
+            else:
+                out.append(f"In the previous month {label}'s ad library said {_where(note)} was "
+                           f"not running ads, but that address fits ads from more than one page "
+                           f"(page ids {which}); {n} {label} {noun(n)} shown this month "
+                           f"{_plural(n, 'is', 'are')} not counted as new: it is not known which "
+                           f"page the library meant.")
+        elif note is not None and note.get("differs"):
+            if side == "gone":
+                out.append(f"{label}'s ad library said {_where(note)} is not currently running "
+                           f"ads, but the address of the page of {n} {label} {noun(n)} from the "
+                           f"previous month is a different one, though the names look alike; "
+                           f"{_plural(n, 'it is', 'they are')} left out of the count of those no "
+                           f"longer there: it is not known whether {_plural(n, 'it is', 'they are')} "
+                           f"the same page.")
+            else:
+                out.append(f"In the previous month {label}'s ad library said {_where(note)} was "
+                           f"not running ads, but the address of the page of {n} {label} "
+                           f"{noun(n)} shown this month is a different one, though the names "
+                           f"look alike; {_plural(n, 'it is', 'they are')} not counted as new: it "
+                           f"is not known whether {_plural(n, 'it is', 'they are')} the same page.")
+        elif note is not None:
+            detail = f" ({note['detail']})" if note.get("detail") else ""
+            if side == "gone":
+                out.append(f"{label}'s ad library returned an error for {_where(note)} this "
+                           f"month{detail}, so its {n} {noun(n)} from the previous month "
+                           f"{_plural(n, 'is', 'are')} left out of the count of those no longer "
+                           f"there: it is not known whether {_plural(n, 'it is', 'they are')} "
+                           f"still running.")
+            else:
+                out.append(f"In the previous month {label}'s ad library returned an error "
+                           f"for {_where(note)}{detail}, so its {n} {noun(n)} shown this "
+                           f"month {_plural(n, 'is', 'are')} not counted as new: it is not "
+                           f"known whether {_plural(n, 'it was', 'they were')} running then.")
+        else:
+            errs = [x for x in notes if x.get("kind") == "error"]
+            nfs = [x for x in _unplaced(notes) if x.get("kind") == "no_ads"]
+            if errs:
+                named = _named(errs)
+                if side == "gone":
+                    out.append(f"{n} {label} {noun(n)} from the previous month could not be "
+                               f"tied to a page the ad library answered for, and the library "
+                               f"returned an error this month{named}, so "
+                               f"{_plural(n, 'it is', 'they are')} left out of the count of "
+                               f"those no longer there: it is not known whether "
+                               f"{_plural(n, 'it is', 'they are')} still running.")
+                else:
+                    out.append(f"{n} {label} {noun(n)} shown this month could not be tied to "
+                               f"a page the ad library answered for in the previous month, "
+                               f"and the library returned an error then{named}, so "
+                               f"{_plural(n, 'it is', 'they are')} not counted as new: it is "
+                               f"not known whether {_plural(n, 'it was', 'they were')} "
+                               f"running then.")
+            if nfs:
+                # What the buyer is told about the pages: a note with an address says
+                # which address and why the tool could not tie it to a page; only a note
+                # with no address at all "did not say which page".
+                why, nameless, seen_w = [], False, set()
+                for x in nfs:
+                    w = x.get("where")
+                    if w in seen_w:
+                        continue
+                    seen_w.add(w)
+                    if not w or w == "a page the scraper did not name":
+                        nameless = True
+                    elif x.get("disputed"):
+                        why.append(f"for {w}, where the library's records disagree about which "
+                                   f"page it is")
+                    elif x.get("conflict"):
+                        a_id, b_id = x["conflict"][0], x["conflict"][1]
+                        why.append(f"for {w}, whose record gives page {a_id} while its address "
+                                   f"gives page {b_id}")
+                    else:
+                        why.append(f"for {w}, which the tool could not tie to a page id")
+                paren = f" ({'; '.join(why[:3])}{'; and more' if len(why) > 3 else ''})" if why else ""
+                tail = ", without saying which page" if nameless else ""
+                if side == "gone":
+                    out.append(f"{label}'s ad library said a searched page is not currently "
+                               f"running ads{paren}{tail}; {n} {label} "
+                               f"{noun(n)} from the previous month could not be tied to a page "
+                               f"it answered for, so {_plural(n, 'it is', 'they are')} left "
+                               f"out of the count of those no longer there: it is not known "
+                               f"whether {_plural(n, 'it is', 'they are')} still running.")
+                else:
+                    out.append(f"In the previous month {label}'s ad library said a searched "
+                               f"page was not running ads{paren}{tail}; "
+                               f"{n} {label} {noun(n)} shown this month could not be tied to "
+                               f"a page it answered for, so {_plural(n, 'it is', 'they are')} "
+                               f"not counted as new: it is not known whether "
+                               f"{_plural(n, 'it was', 'they were')} running then.")
+    if rest:
+        placed_notes = [x for x in notes if _placed(x)]
+        placed = _named(placed_notes)
+        if placed:
+            # The library did answer, but for a page that is not tied to these ads. It is
+            # called "a different page" only when the page ids show it; an address name is
+            # not enough (the same page can sit under a name and an address that differ).
+            n_ids = set()
+            for x in placed_notes:
+                n_ids |= _note_view(x)[0]
+            r_ids = [_rec_page(r)[0] for r in rest_recs]
+            different = bool(n_ids and r_ids and all(i for i in r_ids)
+                             and not (n_ids & set().union(*r_ids))
+                             and all(_note_view(x)[0] for x in placed_notes))
+            what = _plural(rest, "its page", "their pages")
+            other = (f"the library answered for another page{placed}, which is a different page "
+                     f"from {what}" if different else
+                     f"the library answered for {placed.strip(' ()')}, which the tool could not "
+                     f"tie to {what}")
+            if side == "gone":
+                out.append(f"{rest} other {label} {noun(rest)} from the previous month "
+                           f"{_plural(rest, 'was', 'were')} not found this month; {other}.")
+            else:
+                out.append(f"{rest} other {label} {noun(rest)} shown this month had no "
+                           f"counterpart in the previous month; {other}.")
+        elif side == "gone":
+            out.append(f"{rest} other {label} {noun(rest)} from the previous month "
+                       f"{_plural(rest, 'was', 'were')} not found this month, and the "
+                       f"library said nothing about {_plural(rest, 'its page', 'their pages')}.")
+        else:
+            out.append(f"{rest} other {label} {noun(rest)} shown this month had no "
+                       f"counterpart in the previous month, and the library said nothing "
+                       f"about {_plural(rest, 'its page', 'their pages')} then.")
+    if only and stated:
+        out.append("These are not in the counts above, which cover only sources that have "
+                   "ads in both months.")
+    return out
+
+
 def compare_runs(root, run_id, against=None):
     """Compare run_id against a baseline run.
 
@@ -534,6 +965,36 @@ def compare_runs(root, run_id, against=None):
         n = (this_aside_n if item["in_run"] == "baseline" else that_aside_n).get(item["platform"])
         if n:
             item["set_aside_in_other_run"] = n
+    # What each month's library said about pages it could not show ads for (the index's
+    # source_notes), and the sentences that follow from it (see _source_notes).
+    this_notes = _source_notes(index)
+    that_notes = _source_notes(against_index)
+    library_sentences = []
+    # uids of the previous month's ads left out of "no longer there", and of this
+    # month's ads left out of "new", because the library errored on their page.
+    that_lib_unknown, this_lib_unknown = set(), set()
+    for item in platforms_only_in_one:
+        # A platform in only one month, where the other month's library answered with a
+        # status message instead of ads: "not collected in this run" would be false
+        # (the library was asked and answered), so the sentences say what it said.
+        plat = item["platform"]
+        if item["in_run"] == "baseline" and this_notes.get(plat):
+            recs = [r for r in that_show if r.get("platform") == plat]
+            notes, side = this_notes[plat], "gone"
+        elif item["in_run"] == "this" and that_notes.get(plat):
+            recs = [r for r in this_show if r.get("platform") == plat]
+            notes, side = that_notes[plat], "new"
+        else:
+            continue
+        universe = [r for r in (that_full if item["in_run"] == "baseline" else this_full)
+                    if r.get("platform") == plat]
+        stated, unknown = _read_through_notes(recs, notes, [], universe)
+        used = {r.get("uid") for r, _n in stated} | {r.get("uid") for r, _n in unknown}
+        left = [r for r in recs if r.get("uid") not in used]
+        said = _library_sentences(tool, plat, stated, unknown, notes, side, len(left),
+                                  only=True, rest_recs=left)
+        if said:
+            item["library_said"] = said
     # uids of this month's records that the previous month set aside, and of the
     # previous month's records that this month set aside.
     this_from_aside, that_to_aside = set(), set()
@@ -776,6 +1237,40 @@ def compare_runs(root, run_id, against=None):
                 this_dom_not_compared.update(e["uid"] for e in dom_not_compared_before_list)
                 that_dom_not_compared.update(e["uid"] for e in dom_not_compared_now_list)
 
+        # ------------------------------------------------------------------
+        # What the library said about a page (see _source_notes).  Only when a
+        # month's index carries notes for this platform, so every other comparison
+        # is unchanged.  Done after the positional guard on purpose: where the
+        # matching is unsure the lists are already empty, and nothing is claimed.
+        # Previous month's ads missing now: the library errored on their page this
+        # month -> "cannot tell" (left out of gone); it said the page runs no ads
+        # -> stay gone, with its statement attributed.  The mirror for new.
+        # ------------------------------------------------------------------
+        lib_unknown_now_list, lib_unknown_before_list, lib_said = [], [], []
+        if this_notes.get(platform) and gone_list:
+            by_uid = {r.get("uid"): r for r in that_plat_show}
+            stated, unknown = _read_through_notes(
+                [by_uid[e["uid"]] for e in gone_list if e["uid"] in by_uid],
+                this_notes[platform], this_plat_full, that_plat_full)
+            unk = {r["uid"] for r, _n in unknown}
+            lib_unknown_now_list = [e for e in gone_list if e["uid"] in unk]
+            gone_list = [e for e in gone_list if e["uid"] not in unk]
+            that_lib_unknown.update(unk)
+            lib_said += _library_sentences(tool, platform, stated, unknown,
+                                           this_notes[platform], "gone")
+        if that_notes.get(platform) and new_list:
+            by_uid = {r.get("uid"): r for r in this_plat_show}
+            stated, unknown = _read_through_notes(
+                [by_uid[e["uid"]] for e in new_list if e["uid"] in by_uid],
+                that_notes[platform], that_plat_full, this_plat_full)
+            unk = {r["uid"] for r, _n in unknown}
+            lib_unknown_before_list = [e for e in new_list if e["uid"] in unk]
+            new_list = [e for e in new_list if e["uid"] not in unk]
+            this_lib_unknown.update(unk)
+            lib_said += _library_sentences(tool, platform, stated, unknown,
+                                           that_notes[platform], "new")
+        library_sentences.extend(lib_said)
+
         # Human-readable reason shown in the strip per platform.
         # Uses the tool-appropriate noun so "reviews", "ads", or "records"
         # matches the context the user is looking at.
@@ -836,6 +1331,13 @@ def compare_runs(root, run_id, against=None):
             by_platform[platform]["domains_not_compared_now"] = dom_not_compared_now_list
         if dom_not_compared_before_list:
             by_platform[platform]["domains_not_compared_before"] = dom_not_compared_before_list
+        # Present only when the library errored on a page in one month (see above).
+        if lib_unknown_now_list:
+            by_platform[platform]["library_unknown_now"] = lib_unknown_now_list
+        if lib_unknown_before_list:
+            by_platform[platform]["library_unknown_before"] = lib_unknown_before_list
+        if lib_said:
+            by_platform[platform]["library_said"] = lib_said
         totals["new"] += len(new_list)
         totals["gone"] += len(gone_list)
         totals["changed"] += len(changed_list)
@@ -864,7 +1366,8 @@ def compare_runs(root, run_id, against=None):
         this_trashed, that_trashed, shared_platforms, this_id_map, that_id_map,
         by_platform, totals, this_from_aside, that_to_aside, this_aside_n, that_aside_n,
         this_not_pulled_before, that_not_pulled_now,
-        this_dom_not_compared, that_dom_not_compared)
+        this_dom_not_compared, that_dom_not_compared,
+        this_lib_unknown, that_lib_unknown, set(this_notes), set(that_notes))
 
     out = {
         "run": run_id,
@@ -877,7 +1380,7 @@ def compare_runs(root, run_id, against=None):
         "summary": _summary(tool, month_sizes, totals, len(this_from_aside), len(that_to_aside),
                             len(this_not_pulled_before), len(that_not_pulled_now),
                             len(this_dom_not_compared), len(that_dom_not_compared),
-                            platforms_only_in_one),
+                            platforms_only_in_one, library_sentences),
         "month_sizes": month_sizes,
         "by_platform": by_platform,
         "totals": totals,
@@ -1004,7 +1507,7 @@ _NOT_PULLED_WHY = (" Search results are pulled for a limited set of keywords, an
 
 def _summary(tool, month_sizes, totals, shown_again=0, set_aside_now=0,
              not_pulled_before=0, not_pulled_now=0, dom_before=0, dom_now=0,
-             platforms_only=()):
+             platforms_only=(), library_said=()):
     """One ready-to-quote answer: this month's size, then the change counts.
 
     WHY: with month_sizes alone, one of two real sessions (p41fix3, sample r2b) still
@@ -1038,6 +1541,11 @@ def _summary(tool, month_sizes, totals, shown_again=0, set_aside_now=0,
     for item in platforms_only or ():
         if item.get("set_aside_in_other_run"):
             continue
+        if item.get("library_said"):
+            # The other month's library answered with a status message, not ads: it
+            # was collected, so "not collected" would be false (see _source_notes).
+            out += " " + " ".join(item["library_said"])
+            continue
         plat = item.get("platform")
         label = _plat_name(plat) or "A source"
         if plat == "google_serp":
@@ -1049,6 +1557,10 @@ def _summary(tool, month_sizes, totals, shown_again=0, set_aside_now=0,
             out += f" {label} was in the previous month but not collected in this run."
         else:
             out += f" {label} was collected in this run but not in the previous month."
+    # What the library said about a page whose ads are or are not counted (see
+    # _source_notes): said after the counts, never counted in them.
+    for sentence in library_said or ():
+        out += " " + sentence
     if set_aside_now:
         out += (f" {set_aside_now} {_rec_noun(tool, set_aside_now)} shown in the previous "
                 f"month {_plural(set_aside_now, 'is', 'are')} set aside this month, because the "
@@ -1120,7 +1632,9 @@ def _month_sizes(tool, run_id, against_id, this_records, that_records, is_tomb,
                  that_id_map, by_platform, totals, this_from_aside=frozenset(),
                  that_to_aside=frozenset(), this_aside_n=None, that_aside_n=None,
                  this_not_pulled_before=frozenset(), that_not_pulled_now=frozenset(),
-                 this_dom_not_compared=frozenset(), that_dom_not_compared=frozenset()):
+                 this_dom_not_compared=frozenset(), that_dom_not_compared=frozenset(),
+                 this_lib_unknown=frozenset(), that_lib_unknown=frozenset(),
+                 this_note_platforms=frozenset(), that_note_platforms=frozenset()):
     """Return {"this_month": {...}, "previous_month": {...} | None} (see above).
 
     An ad that moved between shown and set aside (compare_runs:
@@ -1177,7 +1691,7 @@ def _month_sizes(tool, run_id, against_id, this_records, that_records, is_tomb,
                 for p, k in sorted(by_plat.items())]
 
     def common(unreadable, tombs, hidden_count, visible, other_label, skip=frozenset(),
-               other_aside_n=None):
+               other_aside_n=None, other_note_plats=frozenset()):
         out = [{"count": unreadable, "reason": (
                    f"{unreadable} {_plural(unreadable, 'entry', 'entries')} in the results "
                    f"file could not be read")},
@@ -1210,6 +1724,13 @@ def _month_sizes(tool, run_id, against_id, this_records, that_records, is_tomb,
                 out.append({"count": k, "reason": (
                     f"{k} search-results {noun(k)} {_be(k)} not compared, because {who} "
                     f"pulled no search results at all")})
+            elif p in other_note_plats:
+                # The other month asked this library and it answered with a status
+                # message instead of ads (compare_runs: _source_notes).
+                out.append({"count": k, "reason": (
+                    f"{k} {_plat_name(p)} {noun(k)} {_be(k)} not compared, because "
+                    f"{who} has no {_plat_name(p)} {noun(2)}: the library answered only with "
+                    f"a status message, not ads")})
             elif p:
                 out.append({"count": k, "reason": (
                     f"{k} {_plat_name(p)} {noun(k)} {_be(k)} not compared, because "
@@ -1222,7 +1743,7 @@ def _month_sizes(tool, run_id, against_id, this_records, that_records, is_tomb,
     # ---- this month ---------------------------------------------------
     u, t, hid, vis = split(this_records, this_trashed)
     this_reasons = common(u, t, len(hid), vis, "previous", skip=this_from_aside,
-                          other_aside_n=that_aside_n)
+                          other_aside_n=that_aside_n, other_note_plats=that_note_platforms)
     this_reasons += moved(vis, this_from_aside, lambda k, P: (
         f"{k} {P} {noun(k)} {_be(k)} shown this month but {_plural(k, 'was', 'were')} set "
         f"aside in the previous month (the advertiser's name did not match the competitor "
@@ -1237,6 +1758,10 @@ def _month_sizes(tool, run_id, against_id, this_records, that_records, is_tomb,
         f"{k_dn} {_plural(k_dn, 'domain', 'domains')} {_be(k_dn)} not compared, because no "
         f"ranking for {_plural(k_dn, 'it', 'them')} was found on a keyword with search "
         f"results in both months")})
+    k_lu = sum(1 for r in vis if r.get("uid") in this_lib_unknown)
+    this_reasons.append({"count": k_lu, "reason": (
+        f"{k_lu} {noun(k_lu)} {_be(k_lu)} not counted as new, because in the previous month "
+        f"the library returned an error for {_plural(k_lu, 'its page', 'their pages')}")})
     unmatched = totals["not_comparable"]
     this_reasons.append({"count": unmatched, "reason": (
         f"{unmatched} {noun(unmatched)} could not be matched to the previous month, so "
@@ -1273,7 +1798,7 @@ def _month_sizes(tool, run_id, against_id, this_records, that_records, is_tomb,
     hid_counted = sum(1 for r in hid if r.get("platform") in shared_platforms
                       and (r.get("platform"), that_id_map.get(r.get("uid"))) in this_show_sids)
     prev_reasons = common(u, t, len(hid) - hid_counted, pvis, "this", skip=that_to_aside,
-                          other_aside_n=this_aside_n)
+                          other_aside_n=this_aside_n, other_note_plats=this_note_platforms)
     prev_reasons += moved(pvis, that_to_aside, lambda k, P: (
         f"{k} {P} {noun(k)} {_be(k)} set aside this month, because the advertiser's name "
         f"does not match the competitor, so {_plural(k, 'it is', 'they are')} left out of "
@@ -1288,10 +1813,16 @@ def _month_sizes(tool, run_id, against_id, this_records, that_records, is_tomb,
         f"{k_dn} {_plural(k_dn, 'domain', 'domains')} {_be(k_dn)} not compared, because no "
         f"ranking for {_plural(k_dn, 'it', 'them')} was found on a keyword with search "
         f"results in both months")})
+    k_lu = sum(1 for r in pvis if r.get("uid") in that_lib_unknown)
+    prev_reasons.append({"count": k_lu, "reason": (
+        f"{k_lu} {noun(k_lu)} {_be(k_lu)} left out of the count of those no longer there, "
+        f"because this month the library returned an error for "
+        f"{_plural(k_lu, 'its page', 'their pages')}")})
     p_unmatched = gone_unknown = matched_hidden = 0
     for r in pvis:
         p = r.get("platform")
         if (p not in shared_platforms or r.get("uid") in that_to_aside
+                or r.get("uid") in that_lib_unknown
                 or r.get("uid") in that_not_pulled_now
                 or r.get("uid") in that_dom_not_compared):
             continue

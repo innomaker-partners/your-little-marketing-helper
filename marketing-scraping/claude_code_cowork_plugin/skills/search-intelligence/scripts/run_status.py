@@ -631,6 +631,19 @@ _ENDED = {
                   "running it was closed)."),
 }
 
+# The opening words of the closing lines when a run reached its end with a step
+# left undone (each tool's _incomplete_report_lines writes them). In a real run
+# a step the budget cap refused was never started, and the run still ended with
+# exit code 0 and outcome "complete" (scheduled repeats and the notification read that
+# value, so it stays). The status answer said "The run finished all its steps."
+# and then quoted a closing that began "This run did not finish everything it was
+# asked to do", two sentences that contradict each other. The answer now looks at the
+# closing it is about to quote, and does not claim every step finished when that
+# closing names one that did not.
+_LEFT_UNDONE = "This run did not finish everything it was asked to do"
+_ENDED_WITH_STEPS_LEFT = ("The run ended; some steps did not finish or were not started, "
+                          "as its closing lines below say.")
+
 # What to tell the user about a run that ended without finishing its steps and
 # without printing its bill (it died, or it was stopped from outside).
 _AFTER_UNFINISHED = [
@@ -664,12 +677,22 @@ def _mins(seconds):
     return f"{s // 60} min {s % 60} s" if s >= 60 else f"{s} s"
 
 
+def _ended_sentence(doc):
+    """The one sentence that says how the run ended. "complete" means the run reached
+    its last line with exit code 0; it does not mean every step ran (see _LEFT_UNDONE),
+    so that sentence is only used when the closing lines name no step left undone."""
+    outcome = doc.get("outcome")
+    if outcome == "complete" and _LEFT_UNDONE in str(doc.get("closing") or ""):
+        return _ENDED_WITH_STEPS_LEFT
+    return _ENDED.get(outcome, "The run has ended.")
+
+
 def _say_finished(folder, doc, earlier_age=None):
     kind = "dry run (it spent nothing)" if doc.get("dry_run") else "run"
     lines = [f"FINISHED: the {kind} in {folder} has ended "
              f"(started {doc.get('started', '?')}, ended {doc.get('finished', '?')}, "
              f"exit code {doc.get('exit_code')}).",
-             _ENDED.get(doc.get("outcome"), "The run has ended.")]
+             _ended_sentence(doc)]
     lines += _earlier_note(earlier_age)
     if doc.get("error"):
         lines.append(f"The error was: {doc['error']}")

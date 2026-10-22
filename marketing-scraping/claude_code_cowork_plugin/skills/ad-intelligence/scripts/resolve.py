@@ -9,11 +9,13 @@ ranked, evidence-carrying candidate identifiers for each ad source:
   - a LinkedIn COMPANY name       -> LinkedIn Ad Library (LI)
 
 Design principles (frozen — do not weaken without a deliberate decision):
-  * Propose ranked candidates with evidence; NEVER silently trust a supplied
-    value and NEVER silently "fix" it. A human confirms at the resolution-report
-    gate before any spend.
+  * Propose ranked candidates with evidence; NEVER silently "fix" a supplied
+    value. A human confirms at the resolution-report gate before any spend. A
+    website the user typed is used as typed (see resolve_competitor for why) and
+    the search's best match is shown beside it; a company given by name alone has
+    only the search to go on.
   * No blanket transforms. A supplied domain is COMPARED to the resolved one and
-    a mismatch is SURFACED — hyphens/format are never auto-stripped (plenty of
+    the difference is SURFACED — hyphens/format are never auto-stripped (plenty of
     real companies keep hyphens: coca-cola.com, best-drains.com are correct).
   * There is no general case, only facets of edge-cases: the resolver ranks by
     general signals (name-token match, position, extra-token penalty) and defers
@@ -44,7 +46,7 @@ sys.path.insert(0, str(_HERE))
 import resolver  # noqa: E402  (shared B1 readers: load_b1_records/index_by_term/organic_of)
 from resolver import _displayed_domain, _is_directory  # noqa: E402
 from postprocess import _domain  # noqa: E402
-from stages import meta_words  # noqa: E402  (the one reading of the search words)
+from stages import meta_words, site_host  # noqa: E402  (the one reading of the search words; the one reading of a typed website)
 
 
 # ---------------------------------------------------------------------------
@@ -107,8 +109,8 @@ def _looks_like_bare_domain(s: str) -> bool:
 def normalize_domain(raw: str) -> str:
     """Lowercase; strip scheme, credentials, port, www., path, query, trailing dot.
     Registrable name is left INTACT — no hyphen or character surgery."""
-    if not raw:
-        return ""
+    if not raw or not isinstance(raw, str):
+        return ""      # a corrupt file can hold a list or a number where text belongs
     host = urlparse(_ensure_scheme(raw)).netloc or ""
     host = host.split("@")[-1].split(":")[0].lower()
     if host.startswith("www."):
@@ -121,9 +123,37 @@ def classify_input(raw: str) -> dict:
     s = (raw or "").strip()
     if not s:
         return {"kind": "empty", "name": "", "domain": ""}
-    if "://" in s or s.lower().startswith("www.") or _looks_like_bare_domain(s):
+    if ("://" in s or s.lower().startswith("www.")
+            or (_looks_like_bare_domain(s) and not _whole_entry_site_refused(s))):
         return {"kind": "domain", "name": "", "domain": normalize_domain(s)}
     return {"kind": "name", "name": s, "domain": ""}
+
+
+def _whole_entry_site_refused(s: str) -> bool:
+    """True when the entry `s` is one dotted word that looks like a website but whose
+    name part (the label left of the ending) is a company form, a generic word or
+    shorter than three characters: "Inc.Co", "Ltd.co", "Pty.Ltd", "co.uk", "Est.io".
+
+    WHY the same rule as for a bracket (_judge_token): as a whole entry such a word
+    was searched on Google as a website, and its ads (a stranger's, or none) were
+    shown under the buyer's competitor with no sign anything was wrong. It is far
+    more often a company form written with a dot than a website. It is then read as a
+    NAME and said so (_read_entry). A platform address is not refused here: it keeps its own
+    notice. "www." or "https://" in front always makes it a website.
+    WHY the case guard is NOT applied to a whole entry (it is, in a bracket): a
+    bracket follows a name, so "Name (St.Louis)" has a reading that is not a website
+    and mixed case is the sign of it. A whole entry has no other reading, and
+    "AcmePlumbing.com" or "Acme.Co.Uk" typed alone is a website; sending it to a
+    name search, whose best match can be a namesake, is the wrong-target risk the
+    typed website exists to avoid. The name-part rule needs no case: a company form is
+    refused whatever its case."""
+    s = (s or "").strip()
+    if not s or " " in s or "://" in s or s.lower().startswith("www."):
+        return False
+    if not _looks_like_bare_domain(s):
+        return False
+    host = normalize_domain(s)
+    return bool(host) and not _platform_label(host) and not _name_part_usable(host)
 
 
 def _tokens(s: str) -> list[str]:
@@ -234,9 +264,16 @@ def _apex_first(cands: list[dict]) -> list[dict]:
     return out
 
 
-def rank_facebook_pages(organic: list, name: str) -> list[dict]:
+def rank_facebook_pages(organic: list, name: str, site: str = "") -> list[dict]:
     """Rank facebook.com advertiser-Page candidates. Skips non-page FB paths.
-    Regional/location pages sink via the extra-token penalty. General."""
+    Regional/location pages sink via the extra-token penalty. General.
+
+    site: the website the user gave together with a company NAME (see
+    pair_competitors). A page is then also a candidate, and scored, by the
+    website's name, because many small companies title their page with their
+    website ("Acme.com (@handle)") and share no word with their registered
+    name. This only widens who can be OFFERED; which page is USED is still
+    decided by _page_named_as, so a namesake is not used because of it."""
     scored: list[dict] = []
     for r in organic or []:
         if not isinstance(r, dict):
@@ -257,9 +294,13 @@ def rank_facebook_pages(organic: list, name: str) -> list[dict]:
         # case: ClutchPointsFootball's post linking basecamp.com), so there
         # only the slug counts.
         is_page = "/" not in path
-        if not _tied(name, title if is_page else "", slug):
+        shown = title if is_page else ""
+        if not (_tied(name, shown, slug) or (site and _tied(site, shown, slug))):
             continue  # no evidence this page belongs to the competitor
-        score = _name_score(name, f"{title} {slug.replace('.', ' ')}")
+        text = f"{title} {slug.replace('.', ' ')}"
+        score = _name_score(name, text)
+        if site:
+            score = max(score, _name_score(site, text))
         scored.append({
             "url": f"https://www.facebook.com/{slug}",
             "slug": slug, "title": title, "score": score,
@@ -276,7 +317,7 @@ def rank_facebook_pages(organic: list, name: str) -> list[dict]:
     return out
 
 
-def _page_named_as(identity: str, cand: dict) -> bool:
+def _page_named_as(identity: str, cand: dict, site: str = "") -> bool:
     """True when a Facebook page candidate is named exactly as the competitor:
     its address (slug) or the page-name part of its title is the competitor's
     name or website name, spaces and punctuation dropped.
@@ -288,19 +329,55 @@ def _page_named_as(identity: str, cand: dict) -> bool:
     from the search. The real pages of Revolut (/revolut), HubSpot (/hubspot,
     whose title is a post's text), Acme Plumbing (/AcmePlumbing) and Basecamp
     ("Basecamp (@basecamphq)") are all named exactly. The title's page name is
-    the text before " | ", " - ", " · " or "(@handle)"."""
+    the text before " | ", " - ", " · " or "(@handle)".
+
+    The website counts when written in full ("Acme.com", "acme.com"): a small
+    company often names its page by its website, and in a real run a page found
+    as a candidate was not used because "Acme.com (@handle)" squashes to
+    "acmecom", which is not the bare label "acme". The full website is as
+    specific as the bare label, so this loosens nothing for a namesake.
+
+    Keys by input:
+      a website typed alone     the label and the website in full;
+      a name (with or without   the name and, when the user gave one, the
+      a website the user gave)  website in full. NOT the bare label: in a real
+                                buyer's run the label matched the address of a
+                                club with the same initials. When the user has
+                                told us the real name, the bare label is the
+                                weaker evidence. (A name that spells the label,
+                                like Acme Plumbing and acmeplumbing.com, still
+                                has it as its own name.)
+    Namesakes cannot be told apart by score (a "Basecamp Lodge" page scores
+    0.95 against "basecamp"), so exact naming stays the only gate."""
     cls = classify_input(identity)
+    # `sites` are websites kept WITH their dots and compared that way. WHY: squashed
+    # ("acmesacom"), "Acme S.A. Com" and "Acmesa-com" read as the website acmesa.com,
+    # and a page named like that is as often a namesake as the company. The
+    # website counts only as written: lower case, spaces removed, dots kept.
     if cls["kind"] == "domain":
         keys = {_squash_words(_registrable_label(cls["domain"]))}
+        sites = {cls["domain"]}
     else:
         keys = {_squash_words(cls["name"])}
-    keys.discard("")
-    if not keys:
+        sites = {normalize_domain(site)} if site else set()
+    # A generic or very short word is no evidence of whose page this is (the same
+    # refusal as the Google owner keys, _GENERIC_KEYS); the full website, dots
+    # kept, still is.
+    keys = {k for k in keys if _usable_key(k)}
+    sites.discard("")
+    if not keys and not sites:
         return False
-    if _squash_words(cand.get("slug") or "") in keys:
+    slug = cand.get("slug") or ""
+    # An ADDRESS has no spaces to mistake: facebook.com/acmesacom is a page address
+    # the company chose for acmesa.com, so the address may drop the dot.
+    if _squash_words(slug) in keys | {_squash_words(x) for x in sites} or slug.lower() in sites:
         return True
-    title = re.split(r"\(@|\s[|·\-–—]\s", cand.get("title") or "")[0]
-    return _squash_words(title) in keys
+    # The page name is the text before the first separator. A title that STARTS
+    # with a separator ("|Acme.com | Facebook") has an empty first piece, so
+    # leading separators are dropped first.
+    title = re.sub(r"^[\s|·\-–—]+", "", cand.get("title") or "")
+    title = re.split(r"\(@|\s[|·\-–—]\s", title)[0]
+    return _squash_words(title) in keys or re.sub(r"\s+", "", title).lower() in sites
 
 
 def extract_linkedin_company(organic: list, name: str) -> dict | None:
@@ -356,11 +433,16 @@ def domain_agreement(supplied: str, resolved: str) -> str:
 # The evidence is the advertiser on the record: `advertiserName` (Google's
 # verified advertiser name) and `advertiserId` (its account id), and the
 # website that was searched (the `domain` in `originUrl`). An advertiser is
-# the competitor's when its name carries the competitor's name or website
-# name as whole words ("Revolut Ltd", "Hubspot, Inc.", "M J Services Inc DBA
-# Best Drains Plumbing"), or when the user listed it for that competitor
-# (`google_advertisers` in the competitor's competitors/resolution.json
-# entry). A name is judged once per advertiser id, so every ad of an
+# the competitor's when its name STARTS with the name the user gave, as whole
+# words ("Revolut Ltd", "Hubspot, Inc.", "M J Services Inc DBA Best Drains
+# Plumbing" for "Best Drains"), or is the website's name part alone, apart from
+# trailing company words, when the user gave only a website ("Roto-Rooter
+# Services Co" for roto-rooter.com); or when the user listed it for that
+# competitor (`google_advertisers` in the competitor's competitors/resolution.json
+# entry). Anchored on purpose: "contains" counted "Joe Bloggs Plumbing Ltd" as
+# plumbing.com's own (_name_is). A label made of two or more whole words
+# ("mrrooter") may also start the name, since every advertiser in the Google pool
+# already advertises the searched website. A name is judged once per advertiser id, so every ad of an
 # advertiser gets the same answer.
 #
 # Every other ad is set aside: not shown as the competitor's, and counted with
@@ -369,24 +451,100 @@ def domain_agreement(supplied: str, resolved: str) -> str:
 # a franchisor's by its parent group) is set aside too, named, and the user can
 # add that name. Setting a real ad aside is visible and fixable; showing
 # another company's ad as the competitor's is the wrong-target failure.
+#
+# What counts as the competitor's NAME, per input (see _owner_names): a company
+# given by name, or by name together with its website ("Acme Strategy Advisors
+# (acmesa.com)", see pair_competitors), is known by that name; every website
+# searched, used or typed adds its name part ("acmesa"), which counts as the
+# advertiser's whole name ("Acmesa.com LLC" is "acmesa" once the company words
+# are dropped; "Acmesa Plumbing" is not), or, for a label of two or more words,
+# as the start of it (_name_is). A
+# company typed as a website alone is known only by
+# the name part, so an ad it places under its full registered name ("Acme Strategy
+# Advisors" for acmesa.com) is set aside: in a real buyer's run that was the
+# result, and the fix is to give the name with the website, which is why the
+# docs recommend that form whenever the user knows both. The config's `subject`
+# is deliberately NOT a key: it is a display label that can be a market phrase
+# ("emergency plumber") or cover several competitors, and as a key it would count
+# a lead-generation advertiser called "Emergency Plumber Co" as the competitor's
+# own, silently. An advertiser that is a legal entity or a person with a
+# different name (a holding company, the owner's own name) stays set aside and
+# named; the user adds it with `google_advertisers`. That trade is on purpose:
+# a real ad set aside is visible and fixable, another company's ad counted as
+# the competitor's is silent.
 # Filtering happens after the paid call: what is scraped, and what it costs,
 # is unchanged, and the raw file keeps every record.
 # ---------------------------------------------------------------------------
 
+# Second-level words that sit under a country ending (bbc.co.uk, acme.com.au,
+# acme.org.uk): the name part is the label to the LEFT of these, not them.
+_SECOND_LEVEL = frozenset("co com org net gov edu ac mil or ne gob gouv sch nom ltd plc".split())
+
+# Words that cannot tell one company from another: company forms, website words
+# and everyday words that are also common endings. WHY refused as an owner key:
+# the key decides which Google advertisers count as THE COMPETITOR'S OWN ads. A
+# key of "ltd" matches every advertiser called "<anything> Ltd", so a stranger's
+# ads were counted as the competitor's with no sign anything was wrong, which is the
+# wrong-target failure. A key shorter than three characters ("go", "ab") is as bad.
+# "est" is "establishment", a company form in some regions (Est. in a name), so
+# "Est.io" is read as a name, not as a website.
+# The cost of refusing is a visible set-aside note and, where the company really is
+# called that, `google_advertisers` (the name to count) fixes it.
+_GENERIC_KEYS = frozenset("""
+ltd inc co corp corporation llc llp plc gmbh sa ag bv nv pty pvt est limited company
+group holdings holding partners associates enterprises international intl global
+shop store stores app apps go get my the web online home info services service
+solutions solution site website official net com org biz digital agency studio
+media team uk us usa eu london
+""".split())
+
+
+# The words that only say what legal form a business has. Narrower than _GENERIC_KEYS
+# on purpose: "Group" and "Holdings" say the name belongs to a larger body, so a name
+# that ends in them is not the business a short website label stands for (see the
+# initials match in _name_is).
+_COMPANY_FORMS = frozenset("""
+ltd inc co corp corporation llc llp plc gmbh sa ag bv nv pty pvt est limited company
+""".split())
+
+
+def _usable_key(key: str) -> bool:
+    return len(key) >= 3 and key not in _GENERIC_KEYS
+
+
 def _registrable_label(domain: str) -> str:
     """The name part of a website: revolut.com -> revolut, help.revolut.com ->
-    revolut, bbc.co.uk -> bbc, acme-plumbing.com -> acme-plumbing."""
-    labels = [x for x in normalize_domain(domain).split(".") if x]
-    if len(labels) >= 3 and len(labels[-1]) == 2 and len(labels[-2]) <= 3:
-        labels = labels[:-2]          # co.uk, com.au, ...
-    elif len(labels) >= 2:
-        labels = labels[:-1]          # .com, .io, ...
-    return labels[-1] if labels else ""
+    revolut, bbc.co.uk -> bbc, acme-plumbing.com -> acme-plumbing, shop.abc.de ->
+    abc. WHY the label just left of the public ending, never a subdomain: the
+    subdomain of a big site ("shop", "app", "go") became the competitor's name and
+    matched every advertiser called that."""
+    labels = [x for x in _site_form(domain).split(".") if x]
+    if len(labels) < 2:
+        return labels[0] if labels else ""
+    cut = 2 if (len(labels) >= 3 and len(labels[-1]) == 2
+                and labels[-2] in _SECOND_LEVEL) else 1
+    return labels[-cut - 1]
 
 
 def _squash_words(s: str) -> str:
     return "".join(_tokens(s))
 
+
+def _core_squash(toks: list) -> str:
+    """The words of a name run together, less the legal-form words that trail it
+    ("Acme Strategy Advisors LLC" and "Acme Strategy Advisors" are both
+    "acmestrategyadvisors"). Used for the names the buyer LISTED (google_advertisers)
+    and for the advertiser name they are compared with. WHY only _COMPANY_FORMS, not
+    _GENERIC_KEYS: a listed name is an explicit claim of exactly that name. Dropping
+    "Holdings" and "Group" as well squashed a listed "Acme Holdings Group LLC" to
+    "acme", so every "Acme", "Acme Holdings" and "Acme Group" in the pool counted as
+    the competitor's. WHY the forms at all: a listed name was compared whole, so
+    "Acme Strategy Advisors" never matched the advertiser "Acme Strategy Advisors LLC"
+    the buyer was looking at, and the remedy did nothing with no sign why."""
+    core = list(toks)
+    while len(core) > 1 and core[-1] in _COMPANY_FORMS:
+        core.pop()
+    return "".join(core)
 
 def google_searched_domain(rec: dict) -> str:
     """The website a Google ad was found by (the `domain` of the search URL the
@@ -396,40 +554,145 @@ def google_searched_domain(rec: dict) -> str:
         q = parse_qs(urlparse(str(rec.get(key) or "")).query)
         d = (q.get("domain") or [""])[0]
         if d:
-            return normalize_domain(d)
+            # parse_qs undoes the address's own encoding; _site_form reads what is
+            # left as a typed website, with the ONE decode it allows (a doubly
+            # encoded acme%252Ecom still reads as acme.com). An address that
+            # spells a path, a login or a NUL reads as no website at all, never as
+            # another site's.
+            return _site_form(d)
     return ""
 
 
-def _owner_names(entry: dict, searched: str) -> tuple:
-    """(words that identify the competitor, advertiser names the user listed)."""
-    keys = set()
+def _raw_owner_keys(entry: dict, searched: str) -> list:
+    """[(key, named)] for every name the competitor could be known by, before any
+    is refused. `named` is True for the name the user gave or the company is
+    called, False for a key that only comes from a website's name part."""
+    keys = []
     if entry.get("kind") == "name":
-        keys.add(_squash_words(entry.get("input") or ""))
-    dom = entry.get("domain") or {}
+        keys.append((_squash_words(entry.get("input") or ""), True))
+    dom = entry.get("domain")
+    dom = dom if isinstance(dom, dict) else {}
     for d in (searched, dom.get("use"), dom.get("supplied")):
-        if d:
-            keys.add(_squash_words(_registrable_label(d)))
-    listed = {_squash_words(n) for n in (dom.get("google_advertisers") or [])
-              if isinstance(n, str)}
-    keys.discard("")
+        if d and isinstance(d, str):
+            keys.append((_squash_words(_registrable_label(d)), False))
+    return [(k, n) for k, n in keys if k]
+
+
+def _owner_names(entry: dict, searched: str) -> tuple:
+    """({key: named}, advertiser names the user listed).
+    A generic or very short key is refused (_GENERIC_KEYS): it would count the
+    ads of every advertiser that shares the word as the competitor's own. A key
+    that is both a given name and a website's name part counts as named."""
+    keys = {}
+    for k, named in _raw_owner_keys(entry, searched):
+        if _usable_key(k):
+            keys[k] = keys.get(k, False) or named
+    dom = entry.get("domain")
+    dom = dom if isinstance(dom, dict) else {}
+    ga = dom.get("google_advertisers")
+    # One name written as text is ONE name. Iterating the text gave one-letter
+    # "names", so an advertiser called "A" became the competitor's and the name the
+    # buyer wrote matched nothing.
+    names = [ga] if isinstance(ga, str) else (ga if isinstance(ga, list) else [])
+    listed = {_core_squash(_tokens(n)) for n in names if isinstance(n, str)}
     listed.discard("")
     return keys, listed
 
 
-def _name_is(adv_name: str, keys: set, listed: set) -> bool:
-    """True when the advertiser name is a listed name, or carries one of the
-    keys as whole words (any run of its words, spaces and punctuation dropped:
-    "Best Drains" carries "bestdrains", "Acme Plumbing Services" carries
-    "acmeplumbing"; "Revolution Bars" does not carry "revolut")."""
+def _merge_owner_names(into_keys: dict, into_listed: set, keys: dict, listed: set) -> None:
+    for k, named in keys.items():
+        into_keys[k] = into_keys.get(k, False) or named
+    into_listed |= listed
+
+
+# Where a legal entity says what it trades as: "M J Services Inc DBA Best Drains
+# Plumbing". The name after the marker is the business the public knows.
+_TRADING_AS = (("dba",), ("d", "b", "a"), ("t", "a"), ("trading", "as"))
+
+
+def _name_starts(adv_name: str) -> list:
+    """The word lists an advertiser name is judged from: the name itself and the
+    name after each "DBA" / "t/a" / "trading as" marker, each without a leading
+    "the"."""
     toks = _tokens(adv_name)
-    if not toks:
-        return False
-    if "".join(toks) in listed:
-        return True
+    starts = [toks]
     for i in range(len(toks)):
-        for j in range(i + 1, len(toks) + 1):
-            if "".join(toks[i:j]) in keys:
+        for mark in _TRADING_AS:
+            if tuple(toks[i:i + len(mark)]) == mark and i + len(mark) < len(toks):
+                starts.append(toks[i + len(mark):])
+    return [t[1:] if t and t[0] == "the" else t for t in starts if t]
+
+
+def _name_is(adv_name: str, keys: dict, listed: set) -> bool:
+    """True when the advertiser name is a listed name, or is the competitor by
+    one of its keys. WHY the match is anchored and not "contains": a key found
+    anywhere in a name counted "Joe Bloggs Plumbing Ltd" as the owner of
+    plumbing.com and "Summit Harbour Hotels" as the owner of summit.com, so a stranger's
+    ads were shown as the competitor's with no sign anything was wrong (the same
+    hole was in the first release). A name is judged from where it STARTS
+    (_name_starts: the name, and what follows "DBA" / "trading as"):
+      - a NAMED key (the name the user gave) matches the first whole words:
+        "Best Drains Ltd", "The Best Drains Co" and "M J Services Inc DBA Best
+        Drains Plumbing" carry "bestdrains"; "Quillonade Bars" does not carry
+        "quillon", and "Joe's Best Drains" does not either.
+      - a key that comes ONLY from a website's name part (the user typed a website
+        and no name) matches in one of two ways. A key that is ONE ordinary word
+        ("best", "plumbing", "dental") must be the WHOLE name, once the trailing
+        company-form and generic words are dropped ("Plumbing Ltd" is "plumbing";
+        "Joe Bloggs Plumbing Ltd" and "HubSpot Partner Agency X" are not "plumbing"
+        or "hubspot"). A key that spans TWO OR MORE whole words of the advertiser's
+        name ("Mr. Rooter" is "mrrooter") also matches at the START of the name,
+        so a franchisee ("Mr. Rooter Plumbing of Abilene") is the competitor's.
+    WHY the second way is safe enough: the Google ads step searches by the
+    verified website, so every advertiser in the pool has already placed ads that
+    point at that website. A stranger is counted only if it did that AND its name
+    starts with the same two or more whole words as a coined label. That is strong
+    evidence of the competitor or its franchisee. Known residue: a label that is
+    itself two ordinary words ("greenenergy.com") would also count "Green Energy
+    Partners Ltd" if that advertiser's ads point at the website. Setting every
+    franchisee aside instead (the whole-name rule alone) turned the 5 real
+    franchisee ads of the development target into 0, which is the opposite defect
+    for a buyer who types only a website. This match is used only for Google ads;
+    Meta and LinkedIn ownership is decided by page and company id, never by name.
+    - a website-only key also matches a name written as its first k whole words
+      followed by the INITIAL LETTER of every word that remains, once the trailing
+      legal-form words (_COMPANY_FORMS) are dropped: "acmesa" is "Acme Strategy
+      Advisors LLC" (acme + s + a). WHY: a firm is often known by a short coined
+      label that is its name with the tail abbreviated, and typed alone (no name)
+      its own ads were set aside as a stranger's. The same evidence as above makes
+      it safe: the pool was searched by the verified website. The guards: the
+      leading words run together are at least 3 characters and not a generic word
+      (a label cannot be "plumbing" plus initials of a stranger's tail), at least 2
+      initials are used (one initial is too easy to hit by chance), and ALL the
+      remaining words must be abbreviated, so "Acme Strategy Advisors Group
+      Holdings" (a larger body, initials "sagh") is not "acmesa". Known residue: a
+      stranger whose name abbreviates to the same label, whose ads also point at
+      the website, would count; the set-aside note and `google_advertisers` are the
+      remedy there too.
+    An advertiser that sits under another name is set aside and named, and
+    `google_advertisers` fixes it."""
+    if _core_squash(_tokens(adv_name)) in listed:
+        return True
+    for toks in _name_starts(adv_name):
+        if _core_squash(toks) in listed:
+            return True
+        for j in range(1, len(toks) + 1):
+            k = "".join(toks[:j])
+            if k in keys and (keys[k] or j >= 2):
                 return True
+        core = list(toks)
+        while len(core) > 1 and core[-1] in _GENERIC_KEYS:
+            core.pop()
+        if "".join(core) in keys:
+            return True
+        forms = list(toks)
+        while len(forms) > 1 and forms[-1] in _COMPANY_FORMS:
+            forms.pop()
+        for k in range(1, len(forms) - 1):
+            lead = "".join(forms[:k])
+            if len(lead) >= 3 and lead not in _GENERIC_KEYS:
+                if keys.get(lead + "".join(w[0] for w in forms[k:])) is False:
+                    return True
     return False
 
 
@@ -453,12 +716,16 @@ def google_ad_owners(items: list, entries: list) -> list:
       "unnamed" the record carries no advertiser name or id to judge by.
     Pure. `entries` is competitors/resolution.json ([] when absent: the
     searched website's own name is then the only key)."""
+    # website -> EVERY entry that uses it. WHY a list: two competitors can share
+    # one website (two names for one company, or a parent and its brand). Keeping
+    # only the first entry made the second's name a stranger on that website, so
+    # its own ads there were set aside as "another advertiser's".
     by_dom = {}
     for e in entries or []:
         if isinstance(e, dict):
-            d = normalize_domain((e.get("domain") or {}).get("use") or "")
+            d = _site_form((e.get("domain") or {}).get("use"))
             if d:
-                by_dom.setdefault(d, e)
+                by_dom.setdefault(d, []).append(e)
     groups = {}   # (searched, advertiser key) -> [names]
     keyed = []
     for rec in items or []:
@@ -473,19 +740,40 @@ def google_ad_owners(items: list, entries: list) -> list:
     verdict_of = {}
     for (searched, akey), names in groups.items():
         if searched in by_dom:
-            keys, listed = _owner_names(by_dom[searched], searched)
+            keys, listed = {}, set()
+            for e in by_dom[searched]:
+                _merge_owner_names(keys, listed, *_owner_names(e, searched))
         elif searched:
             keys, listed = _owner_names({}, searched)
         else:   # the record does not say which website found it: any competitor
-            keys, listed = set(), set()
-            for e in by_dom.values():
-                k, l = _owner_names(e, "")
-                keys |= k
-                listed |= l
+            keys, listed = {}, set()
+            for es in by_dom.values():
+                for e in es:
+                    _merge_owner_names(keys, listed, *_owner_names(e, ""))
         own = any(_name_is(n, keys, listed) for n in names if n)
         verdict_of[(searched, akey)] = "own" if own else (
             "other" if any(names) else "unnamed")
     return [verdict_of[k] if k[1] else "unnamed" for k in keyed]
+
+
+# The remedy for a set-aside advertiser by editing the file and running again. It is
+# part of the line for a competitor with NO usable key (that line is the only
+# explanation the buyer gets), and the run's console says it ONCE after the
+# ordinary set-aside lines (GOOGLE_LIST_REMEDY_CONSOLE). WHY the console: a company
+# that advertises under its full legal name, the case that brings a buyer here most,
+# reaches the buyer as the ordinary line, and the console used to give only the
+# ask-Claude route (GOOGLE_CONFIRM_HOW), not the file the tool actually reads. WHY
+# not on every ordinary line: those lines are shared with the app, the digest and
+# the report, each of which gives its own way to confirm once, and a line per
+# website repeated the instruction until it read as several.
+GOOGLE_LIST_REMEDY = (
+    "If that is wrong, list its advertiser names under google_advertisers in its entry "
+    "in competitors/resolution.json and run again; the saved Google ads are sorted "
+    "again, nothing is searched again.")
+GOOGLE_LIST_REMEDY_CONSOLE = (
+    "Or, from the command line: list the advertiser's name under google_advertisers in "
+    "that competitor's entry in competitors/resolution.json and run again; the saved "
+    "Google ads are sorted again, nothing is searched again.")
 
 
 def google_set_aside_lines(items: list, entries: list, verdicts: list = None) -> list:
@@ -494,8 +782,28 @@ def google_set_aside_lines(items: list, entries: list, verdicts: list = None) ->
     Counts come from google_ad_owners, never from the caller."""
     if verdicts is None:
         verdicts = google_ad_owners(items, entries)
-    by_dom = {normalize_domain((e.get("domain") or {}).get("use") or ""): e
+    by_dom = {_site_form((e.get("domain") or {}).get("use")): e
               for e in (entries or []) if isinstance(e, dict)}
+    # Websites whose competitor has no usable owner key (every key refused as
+    # generic or too short, see _GENERIC_KEYS) and no listed advertiser name:
+    # {website: the refused words}. Their ads are set aside, and this says why.
+    no_key = {}
+    for site in {google_searched_domain(r if isinstance(r, dict) else {})
+                 for r in items or []}:
+        if not site:
+            continue
+        ents = [e for e in (entries or []) if isinstance(e, dict)
+                and _site_form((e.get("domain") or {}).get("use")) == site]
+        raw, usable, listed = [], False, False
+        for e in (ents or [{}]):
+            k, l = _owner_names(e, site)
+            usable = usable or bool(k)
+            listed = listed or bool(l)
+            raw += [w for w, _ in _raw_owner_keys(e, site)]
+        if not usable and not listed and raw:
+            no_key[site] = ", ".join(f"'{w}'" for w in dict.fromkeys(raw)) + (
+                " is too generic or too short to tell companies apart"
+                if len(set(raw)) == 1 else " are too generic or too short to tell companies apart")
     per = {}      # searched -> {"total", "other": {name: n}, "unnamed"}
     order = []
     for rec, v in zip(items or [], verdicts):
@@ -542,6 +850,11 @@ def google_set_aside_lines(items: list, entries: list, verdicts: list = None) ->
                 f"{p['unnamed']} of {p['total']} Google ads {where} carry no advertiser "
                 f"name, so the tool cannot tell whose they are. They are not shown as "
                 f"{not_by}.")
+        if s and s in no_key:
+            lines.append(
+                f"{who} has no name the tool can safely match advertisers against "
+                f"({no_key[s]}), so none of its Google ads found for {s} can be confirmed "
+                f"as its own; all are set aside. {GOOGLE_LIST_REMEDY}")
     return lines
 
 
@@ -573,7 +886,7 @@ def google_own_lines(items: list, entries: list, verdicts: list = None) -> list:
     partner among them and fix it in competitors/resolution.json."""
     if verdicts is None:
         verdicts = google_ad_owners(items, entries)
-    by_dom = {normalize_domain((e.get("domain") or {}).get("use") or ""): e
+    by_dom = {_site_form((e.get("domain") or {}).get("use")): e
               for e in (entries or []) if isinstance(e, dict)}
     per, order = {}, []
     for rec, v in zip(items or [], verdicts):
@@ -630,10 +943,11 @@ def google_advertisers_misplaced(entries) -> list:
     that the tool does not read ([] when every such key is where it is read).
 
     WHY (the silent-zero class): the tool reads advertiser names only
-    from entry["domain"]["google_advertisers"], a list of names (_owner_names). A key
-    put anywhere else (directly in the entry, the literal reading of the old confirm
-    sentence, or under "facebook"), or a single name written as text instead of a
-    list, changed nothing, and the rebuild reported success. This says so, naming the
+    from entry["domain"]["google_advertisers"], a list of names (_owner_names; one name
+    written as text counts as a list of one). A key put anywhere else (directly in the
+    entry, the literal reading of the old confirm sentence, or under "facebook"), or a
+    value that is neither a list nor text, changed nothing, and the rebuild reported
+    success. This says so, naming the
     competitor and where the key belongs. It only warns: which ads are set aside is
     unchanged (the matching rule above is not touched). Pure.
 
@@ -672,7 +986,7 @@ def google_advertisers_misplaced(entries) -> list:
                                 f"then rebuild the index.")
                         # null, "" and other empty values are read as no names (`or []`
                         # in _owner_names), so only a value with content can be wrong.
-                        elif v and not isinstance(v, list):
+                        elif v and not isinstance(v, (list, str)):
                             out.append(
                                 f"In competitors/resolution.json, \"google_advertisers\" for "
                                 f"{who} is not a list of names, so the tool does not read it. "
@@ -716,7 +1030,7 @@ def google_set_aside_labels(items: list, entries: list, verdicts: list = None) -
     Pure; the counts come from google_ad_owners, never from the caller."""
     if verdicts is None:
         verdicts = google_ad_owners(items, entries)
-    by_dom = {normalize_domain((e.get("domain") or {}).get("use") or ""): e
+    by_dom = {_site_form((e.get("domain") or {}).get("use")): e
               for e in (entries or []) if isinstance(e, dict)}
     per, order = {}, []
     for rec, v in zip(items or [], verdicts):
@@ -842,23 +1156,45 @@ def _fb_page(entry: dict) -> str:
     return ((entry.get("facebook") or {}).get("use") or "").strip()
 
 
-def resolve_competitor(raw: str, organic: list, supplied_domain: str = "") -> dict:
+def resolve_competitor(raw: str, organic: list, supplied_domain: str = "",
+                       unused_bracket: str = "") -> dict:
     """Given a raw input and its SERP organic results, return a resolution entry
     with a chosen value + ranked candidates + flags for every target. Pure.
 
     The `use` fields are DEFAULTS for a non-interactive run; the `flags` and
     `candidates` exist so the resolution report can ask the human to confirm or
-    correct before any spend. On a supplied-vs-resolved domain mismatch the
-    default is the EVIDENCE-BACKED resolved domain (the supplied one is unproven),
-    but the mismatch is always flagged — never silently applied.
+    correct before any spend.
+
+    A website the user TYPED (as a domain input, or together with a name) stands
+    as `domain.use`. When the search's best website differs it is kept as
+    `resolved` and in `candidates`, and the report shows it as information the
+    user can act on; it is not applied. WHY: the earlier rule used the search's
+    best website whenever it differed, on the reasoning that a typed value is
+    unproven. In a real buyer's run 5 of 14 typed websites were replaced by a
+    third-party page that carried the brand in its title (a jobs board, a trade
+    news article, a company database), one website resolved to itself on one run
+    and to a jobs board 40 minutes later (Google's ranking drifts), and the
+    buyer then had to correct each one by hand. A buyer's typed website is wrong
+    far less often than the top search result for a small company is, and a
+    typo is still caught, because the difference is shown beside it. A company
+    given by NAME ONLY has no typed value: the search is the only evidence there,
+    so its best website is used. That result can vary between runs for the same
+    reason, which is why the confirmation gate exists.
 
     supplied_domain: the domain the user gave for this same company when it
     was given both as a name and as a domain (see pair_competitors). It is
-    checked against the resolved domain exactly like a domain input.
+    treated exactly like a domain input.
+
+    unused_bracket: a website-looking bracket the buyer typed that was NOT taken
+    as the website (unused_bracket_sites). Kept as `domain.typed_unused` so the
+    report, the closing lines and the digest can say that the website searched
+    came from a name lookup and was not what the buyer typed.
     """
     cls = classify_input(raw)
     identity = cls["name"] or cls["domain"]
     supplied = cls["domain"] or normalize_domain(supplied_domain)
+    # The website the user gave alongside a NAME (a domain input is its own identity).
+    site = supplied if cls["kind"] == "name" else ""
 
     domains = rank_domain_candidates(organic, identity)
     resolved_domain = domains[0]["domain"] if domains else ""
@@ -870,22 +1206,17 @@ def resolve_competitor(raw: str, organic: list, supplied_domain: str = "") -> di
     # which is no evidence that the page is theirs. With no page left, the
     # report and the run say plainly that no Facebook page was found and what
     # Meta searches instead (see _META_NO_PAGE_FLAG).
-    fb = [c for c in rank_facebook_pages(organic, identity) if c["score"] > 0]
+    fb = [c for c in rank_facebook_pages(organic, identity, site) if c["score"] > 0]
     # Namesakes: a page whose name only CONTAINS the brand word
     # ("Patagonian BaseCamp Lodge", "Air Force BASECAMP | Dhaka") is not used
     # on its own; it stays a possible page for the user to confirm. Only a page
     # named exactly as the competitor is used (_page_named_as), best score first.
-    named = [c for c in fb if _page_named_as(identity, c)]
+    named = [c for c in fb if _page_named_as(identity, c, site)]
     fb = named + [c for c in fb if c not in named]
     li = extract_linkedin_company(organic, identity)
     agree = domain_agreement(supplied, resolved_domain)
 
     flags: list[str] = []
-    if agree == "mismatch":
-        flags.append(
-            f"domain mismatch: supplied {supplied!r} != resolved "
-            f"{resolved_domain!r}{_MISMATCH_END}"
-        )
     if not resolved_domain and cls["kind"] != "domain" and not supplied:
         flags.append(_NO_DOMAIN_FLAG)
     if not named:
@@ -893,21 +1224,22 @@ def resolve_competitor(raw: str, organic: list, supplied_domain: str = "") -> di
     if not li:
         flags.append(_NO_LINKEDIN_FLAG)
 
-    if agree == "match":
-        use_domain = supplied
-    elif agree == "mismatch":
-        use_domain = resolved_domain          # evidence-backed default; flagged above
-    else:  # no_supplied / unresolved
-        use_domain = resolved_domain or supplied
+    # `agreement` records how the typed website compares with the search's best;
+    # it is a fact about the search and is never edited. The report compares the
+    # typed website with `use` (what will be searched), see _domain_view.
+    use_domain = supplied or resolved_domain
 
+    dom_entry = {
+        "use": use_domain, "supplied": supplied,
+        "resolved": resolved_domain, "agreement": agree,
+        "candidates": domains[:3],
+    }
+    if unused_bracket and not supplied:
+        dom_entry["typed_unused"] = unused_bracket
     return {
         "input": raw,
         "kind": cls["kind"],
-        "domain": {
-            "use": use_domain, "supplied": supplied,
-            "resolved": resolved_domain, "agreement": agree,
-            "candidates": domains[:3],
-        },
+        "domain": dom_entry,
         "facebook": {"use": named[0]["url"] if named else "", "candidates": fb[:4]},
         "linkedin": {
             "use": li["name"] if li else "",
@@ -915,6 +1247,113 @@ def resolve_competitor(raw: str, organic: list, supplied_domain: str = "") -> di
         },
         "flags": flags,
     }
+
+
+def _domain_view(dom: dict) -> tuple:
+    """(tag, note, mismatch_flag) for the Google website line of the report,
+    read from the entry AS IT STANDS in resolution.json.
+
+    WHY: the report is printed again whenever a resolution is reused, after the
+    user may have edited `use` by hand. In a real run the buyer corrected `use`
+    back to the website they had typed and the re-printed report still said
+    "MISMATCH vs supplied", because it read the `agreement` field written at
+    lookup time (typed website against the search's best), not the website that
+    will actually be searched. The comparison that matters is the typed website
+    against `use`.
+
+    tag            the bracket after the website;
+    note           a plain line about the search's best match when it differs from
+                   the website in use ('' when there is nothing to say);
+    mismatch_flag  a warning when the website in use is NOT the one the user typed
+                   ('' otherwise)."""
+    use = _site_form(dom.get("use"))
+    supplied = normalize_domain(dom.get("supplied") or "")
+    resolved = normalize_domain(dom.get("resolved") or "")
+    stored = dom.get("agreement") or "no_supplied"
+    typed = dom.get("typed_unused")
+    if (not supplied and isinstance(typed, str) and typed
+            and normalize_domain(typed) != use):
+        # The buyer typed a website in brackets that was not taken as the website;
+        # `use` is what a name lookup found. A plain "resolved from name" hid that,
+        # and a namesake's website was searched under the buyer's eyes.
+        return (f"⚠ resolved from name; you wrote {typed!r} in brackets, it was not used as the "
+                f"website", "",
+                f"you wrote {typed!r} in brackets but it was not used as the website. "
+                f"Google will search {use or 'nothing'!r}, which the name lookup found and "
+                f"could not confirm. Check `use` in competitors/resolution.json")
+    if not supplied:
+        return ({"match": "✓ matches supplied", "mismatch": "⚠ MISMATCH vs supplied",
+                 "no_supplied": "resolved from name",
+                 "unresolved": "⚠ NOT resolved"}.get(stored, "resolved from name"), "", "")
+    if not use:
+        # `use` blanked: the competitor is left out of the Google search (a user
+        # who blanks it does not want that site searched). "will use ''" read as
+        # if a website named '' would be searched.
+        return ("⚠ MISMATCH vs supplied", "",
+                f"domain mismatch: you gave {supplied!r} but `use` is blank, so Google will "
+                f"not be searched for this competitor. Put the website in `use` in "
+                f"competitors/resolution.json to search it")
+    if use != supplied:
+        return ("⚠ MISMATCH vs supplied", "",
+                f"domain mismatch: you gave {supplied!r} but the Google search will use "
+                f"{use!r}. Confirm which website is right before the Google scrape")
+    if not resolved:
+        return ("⚠ NOT resolved", "", "")
+    if resolved == supplied:
+        return ("✓ matches supplied", "", "")
+    # The typed website stands, but the search found a different one: a ✓ here
+    # would read as "the search agrees", which it does not. The ⚠ marks that
+    # the buyer's word is being taken over the search's, so a typo in the
+    # typed website (widgetise.com for widgetize.com) is not passed as checked.
+    return (f"⚠ the website you gave; the search's best match is {resolved}",
+            f"the search's best match was {resolved}; the website you gave ({supplied}) "
+            f"is used. If {resolved} is the right one, change `use` in "
+            f"competitors/resolution.json",
+            "")
+
+
+def website_note_lines(entries: list, searched=None) -> list[str]:
+    """Plain sentences for competitors whose website Google searched although it
+    is not the confirmed company website, so a wrong or mistyped website cannot
+    yield an empty or foreign result that is read as "that company runs no Google
+    ads". Three cases, each only for a website that Google DID search:
+      - the buyer's typed website, where the search's best match was another one;
+      - the buyer's typed website, where the search found nothing for it;
+      - a website the name lookup chose, because the website the buyer typed in
+        brackets was not used.
+    WHY a line beyond the report's ⚠ marker: the marker is in the confirmation
+    report, which a reviewed, non-interactive run never shows to a person; this
+    goes where the results are read (the closing lines and the data digest).
+    `searched`: the websites Google actually searched, from the record of the
+    search itself (None = all), so a competitor held back is never claimed."""
+    out = []
+    keep = None if searched is None else {normalize_domain(x) for x in searched}
+    for e in entries:
+        dom = e.get("domain")
+        if not isinstance(dom, dict):
+            continue
+        use = _site_form(dom.get("use"))
+        supplied = normalize_domain(dom.get("supplied") or "")
+        resolved = normalize_domain(dom.get("resolved") or "")
+        typed = dom.get("typed_unused")
+        if not use or (keep is not None and use not in keep):
+            continue
+        if supplied and use == supplied and resolved and resolved != supplied:
+            out.append(f"Google searched {use} as you gave it; the search's best match for it "
+                       f"was {resolved}. If that is the company's site, change `use` in "
+                       f"competitors/resolution.json.")
+        elif supplied and use == supplied and not resolved:
+            out.append(f"Google searched {use} as you gave it; the search found nothing for "
+                       f"it. Check the spelling, and change `use` in "
+                       f"competitors/resolution.json if it is wrong.")
+        elif (not supplied and isinstance(typed, str) and typed
+              and normalize_domain(typed) != use):
+            out.append(f"You wrote {typed!r} in brackets for {e.get('input') or use}, but it "
+                       f"was not used as the website. Google searched {use}, which the "
+                       f"tool found by looking up the name and could not confirm. If that "
+                       f"is not the company's site, change `use` in "
+                       f"competitors/resolution.json.")
+    return list(dict.fromkeys(out))
 
 
 def format_resolution_report(entries: list[dict], meta_search_terms=None) -> str:
@@ -946,9 +1385,10 @@ def format_resolution_report(entries: list[dict], meta_search_terms=None) -> str
         also = f", also given as the domain {also}" if also else ""
         lines.append(f"\n▸ input: {e['input']!r}  (read as {e['kind']}{also})")
         dom = e["domain"]
-        tag = {"match": "✓ matches supplied", "mismatch": "⚠ MISMATCH vs supplied",
-               "no_supplied": "resolved from name", "unresolved": "⚠ NOT resolved"}[dom["agreement"]]
+        tag, dom_note, dom_flag = _domain_view(dom)
         lines.append(f"    Google  domain   : {dom['use'] or '(none)'}   [{tag}]")
+        if dom_note:
+            lines.append(f"              {dom_note}")
         if dom["candidates"]:
             alt = ", ".join(f"{c['domain']}({c['score']})" for c in dom["candidates"])
             lines.append(f"              candidates: {alt}")
@@ -988,11 +1428,19 @@ def format_resolution_report(entries: list[dict], meta_search_terms=None) -> str
         # the id and would otherwise be silently empty.
         if li["use"] and "company_id" in li:
             id_tag = (f"  [id {cid}]" if cid else
-                      "  ⚠ NO numeric LinkedIn company id found, so its LinkedIn ads are not searched")
+                      "  ⚠ NO numeric LinkedIn company id found, so its LinkedIn ads are not searched"
+                      + linkedin_id_remedy(li))
         else:
             id_tag = ""
         lines.append(f"    LinkedIn company : {li['use'] or '(none)'}{id_tag}")
-        flags = [_shown_flag(f) for f in e["flags"]]
+        # The website comparison is read from the entry as it stands (_domain_view),
+        # so a stored "domain mismatch" flag is replaced by it. An entry with no
+        # typed website has nothing to recompute from and shows its flags as stored.
+        recompute = bool((dom.get("supplied") or "").strip())
+        flags = [_shown_flag(f) for f in e["flags"]
+                 if not (recompute and f.startswith("domain mismatch:"))]
+        if dom_flag:
+            flags.insert(0, dom_flag)
         # A stored entry whose page was removed by hand carries no flag; the
         # missing page still needs its warning.
         if not _fb_page(e) and _META_NO_PAGE_FLAG not in flags:
@@ -1084,12 +1532,14 @@ def write_queries(identities: list[str], workdir: str | Path) -> Path:
 
 
 def resolve_all(identities: list[str], workdir: str | Path,
-                supplied: dict | None = None) -> list[dict]:
+                supplied: dict | None = None, unused: dict | None = None) -> list[dict]:
     """Resolve each raw competitor identity (a name OR a domain, any case) using
     the B1 SERP results already fetched to <workdir>/B1_serp_competitors/.
     Returns one resolution entry per identity (see resolve_competitor).
     `supplied` maps a name identity to the domain the user also gave for it
     (supplied_domains(cfg)); that domain is checked against the resolved one.
+    `unused` maps an identity to the bracket website that was typed but not used
+    (unused_bracket_sites(cfg)).
 
     Aggregates the organic results across ALL of an identity's queries (bare +
     facebook-scoped + linkedin-scoped), de-duped, before ranking — so domain,
@@ -1113,7 +1563,8 @@ def resolve_all(identities: list[str], workdir: str | Path,
                     continue
                 seen_urls.add(key)
                 organic.append(r)
-        entries.append(resolve_competitor(raw, organic, (supplied or {}).get(raw, "")))
+        entries.append(resolve_competitor(raw, organic, (supplied or {}).get(raw, ""),
+                                          (unused or {}).get(raw, "")))
     return entries
 
 
@@ -1164,6 +1615,29 @@ _LI_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 
 
+def linkedin_id_remedy(li: dict) -> str:
+    """The plain remedy, in brackets, for a LinkedIn company with no numeric id
+    ('' when the entry does not say why, e.g. a file from an older version).
+    Every sentence is true of the stored cause (see LI_ID_FETCH_FAILED)."""
+    why = (li or {}).get("id_lookup")
+    if why == LI_ID_FETCH_FAILED:
+        return (" (the company page could not be fetched, so trying again later may work; "
+                "or add `company_id` to this entry in competitors/resolution.json)")
+    if why == LI_ID_PAGE_UNSETTLED:
+        # Not "trying again will not help": a 200 response is also what LinkedIn
+        # returns when it shows a sign-in page in place of the company page, and
+        # that can differ from one run to the next.
+        return (" (the company page was read but did not give one company id; LinkedIn "
+                "sometimes shows a sign-in page instead of the company page, so a later "
+                "run may work; or add `company_id` to this entry in "
+                "competitors/resolution.json)")
+    if why == LI_ID_NO_PAGE:
+        return (" (this entry has a LinkedIn company name but no company page address, so "
+                "there was no page to read; add the page address as `url`, or add "
+                "`company_id`, to this entry in competitors/resolution.json)")
+    return ""
+
+
 def _linkedin_slug(entry: dict) -> str:
     """The LinkedIn vanity slug for a resolution entry ('' if none)."""
     li = entry.get("linkedin") or {}
@@ -1174,14 +1648,34 @@ def _linkedin_slug(entry: dict) -> str:
     return m.group(1) if m else ""
 
 
-def fetch_linkedin_company_id(slug: str, timeout: int = 20) -> str:
-    """Resolve a LinkedIn company vanity slug to its NUMERIC company id via the
-    public company page (no auth). Returns '' on any failure. A numeric slug is
-    passed through unchanged. Deterministic HTTP GET — safe to time out."""
+# Why a LinkedIn company id is empty, stored beside it as linkedin.id_lookup.
+# The two causes have different remedies, so one flag for both sent a buyer to
+# add the id by hand when waiting would have worked, or to retry when the page
+# had already been read and does not settle it:
+#   fetch_failed     the company page could not be fetched (blocked, timed out,
+#                    network error): try again later, or add company_id by hand;
+#   page_unsettled   the page was read (HTTP 200) but does not name one id for
+#                    the company (none found, a list of several, or a conflict).
+#                    NOT "retrying will not help": LinkedIn answers 200 with a
+#                    sign-in page too, which can differ run to run; so a later
+#                    run may work, or add company_id by hand;
+#   no_page          the entry has a company name but no slug or url, so there
+#                    was no page to fetch: give the page address (url) or the id.
+LI_ID_FETCH_FAILED = "fetch_failed"
+LI_ID_PAGE_UNSETTLED = "page_unsettled"
+LI_ID_NO_PAGE = "no_page"
+
+
+def linkedin_company_id_lookup(slug: str, timeout: int = 20) -> tuple:
+    """(id, why) for a LinkedIn company vanity slug. `why` is '' when an id was
+    found, else LI_ID_FETCH_FAILED or LI_ID_PAGE_UNSETTLED (above); a missing
+    slug is LI_ID_NO_PAGE, since there is no page to fetch (and none was read). Network (one
+    GET of the public company page, no auth); a deterministic call, so it is
+    safe to time out."""
     if not slug:
-        return ""
+        return "", LI_ID_NO_PAGE
     if slug.isdigit():
-        return slug
+        return slug, ""
     import urllib.request
     req = urllib.request.Request(
         f"https://www.linkedin.com/company/{slug}",
@@ -1189,9 +1683,18 @@ def fetch_linkedin_company_id(slug: str, timeout: int = 20) -> str:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             html = r.read().decode("utf-8", "ignore")
-    except Exception:  # noqa: BLE001  (network/parse — non-fatal; caller flags the miss)
-        return ""
-    return _linkedin_id_from_html(html)
+    except Exception:  # noqa: BLE001  (network/parse: non-fatal; caller flags the miss)
+        return "", LI_ID_FETCH_FAILED
+    found = _linkedin_id_from_html(html)
+    return found, ("" if found else LI_ID_PAGE_UNSETTLED)
+
+
+def fetch_linkedin_company_id(slug: str, timeout: int = 20) -> str:
+    """Resolve a LinkedIn company vanity slug to its NUMERIC company id via the
+    public company page (no auth). Returns '' on any failure. A numeric slug is
+    passed through unchanged. Deterministic HTTP GET — safe to time out.
+    (linkedin_company_id_lookup also says WHY an id is empty.)"""
+    return linkedin_company_id_lookup(slug, timeout)[0]
 
 
 def _top_card_org_ids(html: str) -> set:
@@ -1272,27 +1775,100 @@ def enrich_linkedin_ids(entries: list[dict]) -> list[dict]:
         if not li.get("use"):
             continue
         slug = _linkedin_slug(e)
-        li["company_id"] = fetch_linkedin_company_id(slug) if slug else ""
+        li["company_id"], why = (linkedin_company_id_lookup(slug) if slug
+                                 else ("", LI_ID_NO_PAGE))
+        if why:
+            li["id_lookup"] = why     # why the id is empty (see LI_ID_FETCH_FAILED)
+        else:
+            li.pop("id_lookup", None)
         e["linkedin"] = li
     return entries
+
+
+def refresh_linkedin_ids(entries: list[dict]) -> bool:
+    """For a REUSED resolution: look the LinkedIn company id up again where the stored
+    entry has none and that can have changed, and drop a stored cause that no longer
+    applies. Returns True when an entry changed (the caller writes the file).
+
+    WHY: the id lookup ran only when a competitor was resolved the first time, yet
+    the report tells the buyer "add the page address as `url`" (no page) and "trying
+    again later may work" (page could not be fetched, or did not settle). On a
+    plain rerun neither did anything, and the old cause was printed again even
+    after `url` or `company_id` had been added. The lookup reads one free public
+    page (no Apify charge), so repeating it is cheap and makes the remedy true.
+    A `company_id` the buyer typed is never replaced; it only clears the stale cause."""
+    changed = False
+    retry = (LI_ID_FETCH_FAILED, LI_ID_PAGE_UNSETTLED, LI_ID_NO_PAGE)
+    for e in entries:
+        li = e.get("linkedin")
+        if not isinstance(li, dict) or not li.get("use"):
+            continue
+        if str(li.get("company_id") or "").strip():
+            if li.pop("id_lookup", None) is not None:
+                changed = True
+            continue
+        why = li.get("id_lookup")
+        if why not in retry:
+            continue
+        slug = _linkedin_slug(e)
+        if not slug:
+            continue          # still no page address to read: nothing has changed
+        cid, new_why = linkedin_company_id_lookup(slug)
+        li["company_id"] = cid
+        if new_why:
+            li["id_lookup"] = new_why
+        else:
+            li.pop("id_lookup", None)
+        if cid or new_why != why:
+            changed = True
+    return changed
+
+
+def write_entries_only(entries: list[dict], workdir: str | Path) -> None:
+    """Write competitors/resolution.json alone (domains.json and each entry's
+    `written` stay as they are). For a change to an entry that is not about which
+    website Google searches."""
+    (Path(workdir) / "competitors" / "resolution.json").write_text(
+        json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _site_form(value) -> str:
+    """A website as the Google step compares it: no scheme, no www, no path,
+    lower case ('' when blank). The one reading shared with the Google stage
+    (stages.site_host), so a scheme in capitals, a percent-escape or a value that is
+    not text is read the same way by the writer and the reader."""
+    return site_host(value)
 
 
 def write_resolution(entries: list[dict], workdir: str | Path) -> Path:
     """Write the two files the downstream stages read:
       competitors/resolution.json — full entries (build_B4 reads FB pages,
                                      build_LI reads LinkedIn names, report reads all)
-      competitors/domains.json    — de-duped list of chosen `use` domains, the
-                                     existing input build_B5 already consumes.
+      competitors/domains.json    — de-duped list of chosen `use` domains, kept for
+                                     reference and for repeats. The Google stage reads
+                                     the `use` values in resolution.json, not this file
+                                     (stages._curated_domains), so an edit here alone
+                                     changes nothing.
     Returns the competitors/ directory path."""
     comp = Path(workdir) / "competitors"
     comp.mkdir(parents=True, exist_ok=True)
+    # `written` = the website this call puts in domains.json for the entry. WHY:
+    # later, when `use` and domains.json differ, it is the only way to tell "the
+    # user edited `use`" (domains.json still holds what was written) from "the
+    # user edited domains.json" (it no longer does); the first is a clear
+    # instruction, the second leaves two files disagreeing and the tool must
+    # not guess which website to search (stages.google_domain_plan).
+    for e in entries:
+        dom = e.get("domain")
+        if isinstance(dom, dict):
+            dom["written"] = _site_form(dom.get("use"))
     (comp / "resolution.json").write_text(
         json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
 
     domains: list[str] = []
     seen: set[str] = set()
     for e in entries:
-        d = (e.get("domain") or {}).get("use") or ""
+        d = _site_form((e.get("domain") or {}).get("use"))
         if d and d not in seen:
             seen.add(d)
             domains.append(d)
@@ -1305,7 +1881,325 @@ def _squash(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
-def pair_competitors(cfg: dict) -> list[tuple[str, str]]:
+# A trailing "(website)" on a name: "Acme Strategy Advisors (acmesa.com)". No
+# whitespace inside the brackets, so "Acme (see https://x)" is not read as one.
+_TRAILING_SITE_RE = re.compile(r"^(?P<name>.*\S)\s*\(\s*(?P<site>[^()\s]+)\s*\)$")
+_LONE_SITE_RE = re.compile(r"^\(\s*(?P<site>[^()\s]+)\s*\)$")
+_ANY_DOTTED_BRACKET_RE = re.compile(r"\(\s*(?P<site>[^()\s]*\.[^()\s]*)\s*\)")
+
+# Website endings accepted in a bracket without "www." or "https://". Every
+# two-letter country code is accepted (so acme.co.uk and acme.com.au pass through
+# uk and au), and so are these generic endings: about 200 of the most common ones
+# registered for company websites. WHY an allow-list with a case guard (not "any
+# dotted word"): "Pty.Ltd", "St.Louis" and "Inc.Co" read as domains to a pattern that
+# only wants letters after a dot, and a name was then cut and a stranger's site
+# searched. WHY a list that is long, not short: the buyer's typed website must win
+# whenever it plausibly is one; a real "acme.shop" left out of a short list became a
+# NAME, was resolved by search, and a namesake's website was searched instead.
+# Anything left out is not lost: "www." or "https://" in front always works.
+_WEBSITE_ENDINGS = frozenset("""
+com net org info biz xyz online site top shop store app dev io ai co club vip live icu
+cyou sbs cfd rest buzz fun space website tech pro mobi name asia blog cloud digital
+agency studio solutions services group company business consulting marketing media
+design network systems works zone team today world life email tools expert guru ninja
+center centre city academy training capital partners ventures holdings management
+properties realty homes house builders construction contractors engineering repair care
+clinic dental health fitness yoga church school university education events tickets
+travel tours hotel bank money insurance tax cash credit loans finance fund legal law
+lawyer attorney reviews rocks social video photo photography gallery fashion style beauty
+salon boutique furniture kitchen garden florist restaurant pizza coffee bar beer wine
+food farm pet dog auto cars car taxi parts tires plumbing energy solar software games
+game news press page link click work wiki art cafe london nyc berlin paris tokyo
+amsterdam vegas miami wales scot cymru ltd inc llc gmbh limited international global
+institute foundation community support help guide directory exchange market markets
+trade trading shopping sale deals discount coupons bid win bet casino poker bingo dentist
+doctor hospital medical pharmacy vet technology codes domains hosting host coach cab
+""".split())
+
+# Hosts that are where a company has a PROFILE, not its website. A bracket (or a
+# plain entry) holding one of these used to be taken as the company's website, so
+# Google searched facebook.com's ads and ads from other advertisers were counted as
+# the competitor's. Directory hosts come from resolver._is_directory.
+# 1. brand names: the host is <brand>.<com | cc | co.cc | com.cc> with any
+#    subdomains in front (google.co.uk, m.facebook.com, pinterest.com.au).
+#    WHY every country variant is refused for every brand: none of these is ever a
+#    company's own website, so refusing one costs a notice (and "https://" cannot
+#    override it), while accepting one searches a platform and counts the ads of every
+#    advertiser on it. facebook.com.au is not a real second host (it redirects), but
+#    a buyer who pastes it still means a Facebook address.
+_PLATFORM_BRANDS = {
+    "facebook": "Facebook", "instagram": "Instagram", "linkedin": "LinkedIn",
+    "twitter": "X (Twitter)", "youtube": "YouTube", "tiktok": "TikTok",
+    "threads": "Threads", "snapchat": "Snapchat", "pinterest": "Pinterest",
+    "whatsapp": "WhatsApp", "telegram": "Telegram", "google": "Google",
+}
+# 2. exact hosts (and their subdomains): short links and aliases of those platforms.
+_PLATFORM_HOSTS = {
+    "x.com": "X (Twitter)", "t.co": "X (Twitter)", "fb.com": "Facebook",
+    "fb.me": "Facebook", "fb.watch": "Facebook", "instagr.am": "Instagram",
+    "ig.me": "Instagram", "lnkd.in": "LinkedIn", "youtu.be": "YouTube",
+    "wa.me": "WhatsApp", "t.me": "Telegram", "pin.it": "Pinterest",
+    "goo.gl": "Google", "g.co": "Google", "g.page": "Google",
+    "threads.net": "Threads", "threads.com": "Threads",
+}
+# 3. link shorteners and link-in-bio pages: they stand for whatever page the link
+#    points at, so they name nobody's website.
+_LINK_HOSTS = frozenset({
+    "bit.ly", "linktr.ee", "tinyurl.com", "ow.ly", "buff.ly", "rebrand.ly", "is.gd",
+    "cutt.ly", "bio.link", "lnk.bio", "beacons.ai", "carrd.co", "campsite.bio", "s.id",
+})
+# 4. profile and publishing sites where a company has a page, not its website.
+_PROFILE_HOSTS = frozenset({
+    "medium.com", "crunchbase.com", "wikipedia.org", "github.com", "substack.com",
+})
+
+
+def _is_country_tail(tail: list) -> bool:
+    if tail == ["com"]:
+        return True
+    if len(tail) == 1:
+        return len(tail[0]) == 2 and tail[0].isalpha()
+    return len(tail) == 2 and tail[0] in ("co", "com") and len(tail[1]) == 2
+
+
+def _platform_label(host: str) -> str:
+    """Where the address is ('Facebook', 'bit.ly (a link shortener or link-in-bio page)',
+    'yelp.com') for a social, platform, link-shortener, profile or directory host
+    or any subdomain of one, else ''. Read as 'an address on <label>'."""
+    h = (host or "").lower().strip(".")
+    labels = h.split(".")
+    for i, lab in enumerate(labels[:-1]):
+        if lab in _PLATFORM_BRANDS and _is_country_tail(labels[i + 1:]):
+            return _PLATFORM_BRANDS[lab]
+    for dom, label in _PLATFORM_HOSTS.items():
+        if h == dom or h.endswith("." + dom):
+            return label
+    for dom in _LINK_HOSTS:
+        if h == dom or h.endswith("." + dom):
+            return f"{dom} (a link shortener or link-in-bio page)"
+    for dom in _PROFILE_HOSTS:
+        if h == dom or h.endswith("." + dom):
+            return f"{dom} (a profile or publishing site, not a company website)"
+    return h if h and _is_directory(h) else ""
+
+
+def _case_ok(tok: str) -> bool:
+    """The LAST label (the ending) is written in one case: .com or .COM, not .Com.
+    WHY the ending only: a real address is often written in CamelCase in marketing
+    copy ("AcmePlumbing.com", "Acme.com", "BestDrains.co.uk"), and treating it as a
+    name sent a name lookup, whose best match can be a namesake, in place of the
+    website the buyer typed. A company form or a place ("Pty.Ltd", "St.Louis",
+    "Inc.Co") ends in a capitalised word, so it still reads as a name."""
+    head = re.split(r"[/?#]", tok, maxsplit=1)[0]     # a path may have capitals: acme.com/Home
+    last = head.rsplit(".", 1)[-1]
+    return last == last.lower() or last == last.upper()
+
+
+def _website_ending_ok(host: str) -> bool:
+    last = (host or "").rsplit(".", 1)[-1].lower()
+    return last in _WEBSITE_ENDINGS or (len(last) == 2 and last.isalpha())
+
+
+def _name_part_usable(host: str) -> bool:
+    """False when the website's name part (the label left of the public ending) is a
+    company-form or generic word or shorter than three characters: "Ltd.co",
+    "Co.uk", "Inc.co", "Corp.ai", "no.de". WHY at the door and not only as an owner
+    key: such a token is far more often a company form written with a dot than a
+    website, and as a website it would search a stranger's site (the owner-key
+    refusal is only the backstop)."""
+    return _usable_key(_squash_words(_registrable_label(host)))
+
+
+def _judge_token(tok: str) -> tuple:
+    """(verdict, host, platform) for the text of a bracket that has a dot.
+    verdict: 'site' (a website), 'platform' (an address on a platform, link or
+    directory host), 'rejected' (a dotted word that is not taken as a website)."""
+    cls = classify_input(tok)
+    host = cls["domain"] if cls["kind"] == "domain" else ""
+    explicit = "://" in tok or tok.lower().startswith("www.")
+    if not host:
+        return "rejected", host, ""
+    shaped = explicit or (_website_ending_ok(host) and _case_ok(tok))
+    if not shaped:
+        return "rejected", host, ""
+    # A platform address is named as such whatever its name part (x.com, fb.me, t.co
+    # are short on purpose); only a website is held to the name-part rule.
+    plat = _platform_label(host)
+    if plat:
+        return "platform", host, plat
+    if not explicit and not _name_part_usable(host):
+        return "rejected", host, ""
+    return "site", host, ""
+
+
+def _read_entry(raw: str) -> dict:
+    """Read one competitor entry. Keys: kind ('plain' | 'site' | 'platform' |
+    'rejected' | 'skip'), name (the identity to use), site (the website a bracket
+    gave), token (the bracket text, for 'rejected'), notice (plain words, or '').
+
+    Nothing typed is dropped silently: every bracket that holds a dot and is not
+    taken as the website either gives a notice or is read sensibly (a full stop
+    after the bracket, a doubled bracket, a bracket that is the whole entry)."""
+    s = (raw or "").strip()
+    # Stray punctuation after the bracket ("Acme (acme.com).") and a doubled bracket.
+    m = re.match(r"^(.*\))\s*[.,;:!]+$", s)
+    if m:
+        s = m.group(1)
+    s = re.sub(r"\(\s*\(([^()]*)\)\s*\)\s*$", r"(\1)", s)
+    out = {"kind": "plain", "name": s, "site": "", "token": "", "notice": ""}
+    lone = _LONE_SITE_RE.match(s)
+    m = _TRAILING_SITE_RE.match(s) if not lone else None
+    if lone or m:
+        tok = (lone or m).group("site")
+        name = "" if lone else m.group("name").strip()
+        if "." not in tok:
+            if lone:
+                out["name"] = tok     # "(Acme)": the brackets held the whole entry
+            return out
+        verdict, host, plat = _judge_token(tok)
+        if lone:
+            if verdict == "site":
+                out.update(kind="plain", name=host)
+            elif verdict == "platform":
+                out.update(kind="skip", notice=(
+                    f"'{s}' is an address on {plat}, not a company's website, so it was "
+                    f"skipped. To include the company, give its name and website: "
+                    f"'<company name> (<website>)'."))
+            else:
+                out.update(kind="rejected", token=tok,
+                           notice=_rejected_notice(s, tok, s, lone=True))
+            return out
+        if classify_input(name)["kind"] != "name":
+            # "acme.com (acme.com)": a website with its own website in brackets.
+            if verdict == "site" and host == classify_input(name)["domain"]:
+                out.update(name=host)
+            else:
+                out["notice"] = (f"'{s}': the entry has a website before the bracket and "
+                                 f"another thing in it, so it was used as written. Give "
+                                 f"one website per entry, or a company name followed by "
+                                 f"its website in brackets.")
+            return out
+        if verdict == "site":
+            out.update(kind="site", name=name, site=host)
+        elif verdict == "platform":
+            out.update(kind="platform", name=name, notice=(
+                f"'{s}': the bracket text '{tok}' is an address on {plat}, not the company's "
+                f"website, so only '{name}' is used. To give the website, put it in the bracket: "
+                f"'{name} (<website>)'."))
+        else:
+            out.update(kind="rejected", token=tok, notice=_rejected_notice(s, tok, name))
+        return out
+    # A dotted bracket that is not at the end ("Acme (acme.com) Ltd"): it is not
+    # the website (the name is not known to end there), but a typed website must
+    # not vanish: say so, and carry it as unused so the Google line warns too.
+    for mm in _ANY_DOTTED_BRACKET_RE.finditer(s):
+        tok = mm.group("site")
+        verdict, host, plat = _judge_token(tok)
+        if verdict in ("site", "platform"):
+            out.update(kind="rejected", token=tok, notice=(
+                f"'{s}': the bracket text '{tok}' is not at the end of the entry, so it "
+                f"was not used as the website. The entry is used as written and the "
+                f"company will be looked up by search, the website it finds shown as "
+                f"unconfirmed. To give the website, put it last: 'Name (website)'."))
+            break
+    if out["kind"] == "plain" and not out["notice"] and _whole_entry_site_refused(s):
+        # One dotted word typed alone that is a company form or a generic or very
+        # short word with an ending ("Inc.Co", "Pty.Ltd"): read as a NAME, and said
+        # so, because it used to be searched on Google as a website.
+        label = _registrable_label(normalize_domain(s))
+        out["notice"] = (
+            f"'{s}': read as a company name, not a website, because the word before the "
+            f"ending ('{label}') is a company form, a generic word or shorter than three "
+            f"characters, which is far more often a name written with a dot than a "
+            f"website. The company will be looked up by search and the website it finds "
+            f"shown as unconfirmed. If it is a website, write it with https:// in front: "
+            f"'https://{s.lower()}'.")
+    return out
+
+
+def _rejected_notice(s: str, tok: str, name: str, lone: bool = False) -> str:
+    if lone:
+        # The brackets ARE the whole entry ("(Pty.Ltd)"): there is no name before them
+        # to put a website after, so the advice is a bare website or a name first.
+        return (f"'{s}': the bracket text '{tok}' was not used as a website (a website is "
+                f"read from its ending, such as .com, .shop or .agency or a two-letter "
+                f"country code, written all in lower case or all in capitals, and the name "
+                f"before the ending is not a company form or generic word such as Ltd, Inc "
+                f"or Co; www. or https:// in front always works). The entry is used as "
+                f"written and the company will be looked up by search, the website it "
+                f"finds shown as unconfirmed. To give the website, write it with "
+                f"https:// and no brackets, 'https://{tok.lower()}', or put a company "
+                f"name before it, '<company name> (https://{tok.lower()})'.")
+    return (f"'{s}': the bracket text '{tok}' was not used as the website (a bracket is "
+            f"read as a website when its ending is a common website ending such as .com, "
+            f".shop or .agency or a two-letter country code, written all in lower case or "
+            f"all in capitals, and the name before the ending is not a company form or "
+            f"generic word such as Ltd, Inc or Co; www. or https:// in front always "
+            f"works). The entry is used as written, brackets included: the company will "
+            f"be looked up by search and the website it finds shown as unconfirmed, with "
+            f"a warning on its Google line. To give the website, start it with https://, "
+            f"as in '{name} (https://{tok.lower()})'.")
+
+
+def parse_competitor_entry(raw: str) -> tuple:
+    """(name, website, notice) for one competitor entry.
+
+    'Acme Strategy Advisors (acmesa.com)' -> ('Acme Strategy Advisors', 'acmesa.com', '').
+    Anything else is the entry as written with no website and, where the buyer
+    is likely to be surprised, a notice (plain words) saying what was done.
+
+    WHY: a name and a website are the same company only when the name spells the
+    website's first label (pair_competitors), so a company whose name does not
+    ("Acme Strategy Advisors" and acmesa.com) could not be given as ONE
+    competitor. The buyer gave the website alone, and then every lookup that
+    needs the company's name (the search, the Facebook page, the LinkedIn
+    company, the Google advertiser name) was working from the website's label.
+    An explicit pair is unambiguous, which positional pairing of the two lists
+    is not (lists of equal length may name different companies).
+
+    Guards, each against reading ordinary names as pairs: the bracket must be the
+    WHOLE trailing parenthetical, hold a single token with no spaces, and what
+    stands before it must be a name, not a domain. The token must be a website
+    (_judge_token): it has "www." or a scheme ("https://..."), or it is written in
+    one case and ends in one of _WEBSITE_ENDINGS or a two-letter country code. So
+    "Acme (UK) Ltd" (not trailing), "Best Drains (Chicago)" (no dot), "Acme (see
+    https://x)" (spaces inside), "Acme (St.Louis)" and "Acme Holdings (Ltd.co)"
+    (mixed case) stay names; the last two get a notice. A token that is a social,
+    platform, link-shortener or directory address ("facebook.com/acme") is not the
+    company's website: the entry becomes the plain name and the notice says how to
+    give the website. See _read_entry for the punctuation it forgives."""
+    r = _read_entry(raw)
+    if r["kind"] in ("site", "platform"):
+        return r["name"], r["site"], r["notice"]
+    return r["name"], "", r["notice"]
+
+
+def unused_bracket_sites(cfg: dict) -> dict:
+    """{identity: the bracket text that was NOT used as its website} for entries
+    whose dotted bracket was rejected (see _read_entry). The identity is the entry as
+    written, which is what resolution.json stores as `input`.
+
+    WHY carried to the resolution entry: such a company is looked up by its name, and
+    the website the search finds can be a namesake's. Without this the report tagged
+    the line as an ordinary "resolved from name" and the buyer, who had typed the
+    right website, was given no sign it was ignored."""
+    out = {}
+    for raw in list(cfg.get("competitor_names") or []) + list(cfg.get("competitor_domains") or []):
+        r = _read_entry(raw)
+        if r["kind"] == "rejected":
+            out[r["name"]] = r["token"]
+    return out
+
+
+def split_name_and_site(raw: str) -> tuple:
+    """('Acme Strategy Advisors', 'acmesa.com') for 'Acme Strategy Advisors
+    (acmesa.com)', else (raw stripped, ''). See parse_competitor_entry, which
+    also says why an entry was read the way it was."""
+    name, site, _ = parse_competitor_entry(raw)
+    return name, site
+
+
+def pair_competitors(cfg: dict, notices: list | None = None) -> list[tuple[str, str]]:
     """The competitors in the config as (identity, supplied_domain) pairs,
     order-preserving and de-duped case-insensitively.
 
@@ -1318,24 +2212,69 @@ def pair_competitors(cfg: dict) -> list[tuple[str, str]]:
     revolut.com, "Acme Plumbing" and acmeplumbing.com, "Coca-Cola" and
     coca-cola.com). The pair keeps the NAME as the identity (a name search
     finds the Facebook page and LinkedIn company better) and carries the
-    domain as the supplied domain, checked against the resolved one.
+    domain as the supplied domain, which is the website used for Google.
+
+    A company whose name does not spell its website is given as one entry,
+    "Acme Strategy Advisors (acmesa.com)" (parse_competitor_entry): the same shape
+    as an automatic pair. A website that is part of such an entry is not also a
+    second competitor if it appears in the domains list too.
 
     Not paired by list position: a names list and a domains list of the same
     length may name different companies, and merging those would drop a
     competitor without a word. A name and domain that do not match this way
-    stay two competitors, as before; the resolution report shows both."""
-    raws: list[str] = []
-    seen: set[str] = set()
+    stay two competitors, as before; the resolution report shows both.
+
+    `notices`, when given, collects the plain sentences for what was changed or
+    set aside while reading the list (competitor_input_notices prints them):
+    a bracket that was not a website, a social address skipped, a second
+    website for the same name that was not used. Nothing is dropped without one."""
+    say = notices.append if notices is not None else (lambda _t: None)
+    items: list[list] = []           # [identity, explicit website or '']
+    index: dict[str, int] = {}
     for raw in list(cfg.get("competitor_names") or []) + list(cfg.get("competitor_domains") or []):
-        key = (raw or "").strip().lower()
-        if key and key not in seen:
-            seen.add(key)
-            raws.append(raw.strip())
-    classes = [classify_input(r) for r in raws]
+        r = _read_entry(raw)
+        ident, site = r["name"], r["site"]
+        if r["notice"]:
+            say(r["notice"])
+        if r["kind"] == "skip":
+            continue
+        key = ident.lower()
+        if not key:
+            continue
+        if not site:
+            plain = classify_input(ident)
+            plat = _platform_label(plain["domain"]) if plain["kind"] == "domain" else ""
+            if plat:
+                # A profile address typed as a competitor: Google would search the
+                # platform, and every advertiser there would be "the competitor".
+                say(f"'{ident}' is an address on {plat}, not a company's website, so it was "
+                    f"skipped. To include the company, give its name and website: "
+                    f"'<company name> (<website>)'.")
+                continue
+        if key in index:
+            have = items[index[key]]
+            if site and not have[1]:
+                have[1] = site
+            elif site and site != have[1]:
+                say(f"'{have[0]}' was given with two websites, {have[1]} and {site}. A "
+                    f"competitor has one website, so only {have[1]} is used and {site} "
+                    f"is not searched. To search both, give each its own name (add a "
+                    f"word that tells them apart, such as the city or country): "
+                    f"'{have[0]} <city or country> ({site})'.")
+            continue
+        index[key] = len(items)
+        items.append([ident, site])
+    classes = [classify_input(it[0]) for it in items]
+    explicit = {it[1] for it in items if it[1]}
     paired: dict[int, int] = {}      # name index -> domain index
     taken: set[int] = set()          # domain indexes already paired
+    for j, cj in enumerate(classes):
+        # A website given inside a name entry is that competitor's: a bare copy of
+        # it in the domains list is the same company, not a second one.
+        if cj["kind"] == "domain" and not items[j][1] and cj["domain"] in explicit:
+            taken.add(j)
     for i, ci in enumerate(classes):
-        if ci["kind"] != "name" or not _squash(ci["name"]):
+        if ci["kind"] != "name" or not _squash(ci["name"]) or items[i][1]:
             continue
         for j, cj in enumerate(classes):
             if (cj["kind"] == "domain" and j not in taken and cj["domain"]
@@ -1343,8 +2282,22 @@ def pair_competitors(cfg: dict) -> list[tuple[str, str]]:
                 paired[i] = j
                 taken.add(j)
                 break
-    return [(r, classes[paired[i]]["domain"] if i in paired else "")
-            for i, r in enumerate(raws) if i not in taken]
+    out = []
+    for i, it in enumerate(items):
+        if i in taken:
+            continue
+        site = it[1] or (classes[paired[i]]["domain"] if i in paired else "")
+        out.append((it[0], site))
+    return out
+
+
+def competitor_input_notices(cfg: dict) -> list[str]:
+    """The plain sentences for everything the competitor lists changed or set
+    aside on reading (see pair_competitors), de-duplicated, in list order. Empty
+    for an ordinary list. Printed once, before the competitors are resolved."""
+    out: list[str] = []
+    pair_competitors(cfg, out)
+    return list(dict.fromkeys(out))
 
 
 def build_identities(cfg: dict) -> list[str]:
@@ -1361,7 +2314,7 @@ def supplied_domains(cfg: dict) -> dict[str, str]:
     return {ident: dom for ident, dom in pair_competitors(cfg) if dom}
 
 
-def check_resolution_match(identities: list, stored_entries) -> dict:
+def check_resolution_match(identities: list, stored_entries, supplied: dict | None = None) -> dict:
     """Compare the current competitor identities (from the config) with the
     'input' values in a stored resolution.json.
 
@@ -1382,6 +2335,15 @@ def check_resolution_match(identities: list, stored_entries) -> dict:
       config, so we treat the file as not matching and trigger re-resolution.
       A guess here is exactly how the wrong target gets scraped silently — the class
       of failure this check exists to prevent.
+
+    WHY the supplied website is compared too (`supplied`: {identity: website the
+    config gives for it}, as supplied_domains returns it): the stored entry was
+    resolved and confirmed for ONE website. If the buyer later changes the
+    website in the config (a typo fixed, a different company's site), the name
+    is the same, so a names-only comparison reused the old resolution and
+    Google searched the website that was confirmed before. The new website
+    needs its own confirmation, so it counts as a change: looked up again and
+    shown. `supplied` None keeps the comparison to names.
     """
     if not isinstance(stored_entries, list):
         return {
@@ -1409,6 +2371,34 @@ def check_resolution_match(identities: list, stored_entries) -> dict:
     current = {i.strip().lower() for i in identities}
     stored  = {e["input"].strip().lower() for e in stored_entries}
 
+    if current == stored and supplied is not None:
+        want = {k.strip().lower(): normalize_domain(v) for k, v in supplied.items()}
+        changed = []
+        for e in stored_entries:
+            key = e["input"].strip().lower()
+            cls = classify_input(e["input"])
+            expected = want.get(key) or (cls["domain"] if cls["kind"] == "domain" else "")
+            dom = e.get("domain")
+            if not isinstance(dom, dict) or "supplied" not in dom:
+                # An older entry never recorded the website the buyer gave. Missing is
+                # "not known", not "no website": calling it a change re-resolved the
+                # competitor (paid) and overwrote the buyer's edits. Only an explicit
+                # difference is a change.
+                continue
+            had = normalize_domain(dom.get("supplied") or "")
+            if expected != had:
+                changed.append((e["input"], had, expected))
+        if changed:
+            def _site(d):
+                return d if d else "no website"
+            parts = "; ".join(f"{n}: {_site(h)} is now {_site(w)}" for n, h, w in changed)
+            return {"match": False, "added": [], "removed": [], "changed": changed,
+                    "notice": (
+                        f"The website you gave changed ({parts}). "
+                        f"{'That competitor' if len(changed) == 1 else 'Those competitors'} "
+                        f"will be looked up again and shown for confirmation before anything "
+                        f"is scraped, because the confirmed resolution was for the old "
+                        f"website{'' if len(changed) == 1 else 's'}.")}
     if current == stored:
         return {"match": True, "added": [], "removed": [], "notice": ""}
 
@@ -1488,16 +2478,19 @@ if __name__ == "__main__":
     check("C1 LinkedIn full name from title", e1["linkedin"]["use"], "BrandCo Services LLC")
 
     # --- CASE 2: supplied domain MISMATCHES resolved (a typo or redirect case) --
-    # No auto-fix: the mismatch is flagged; the evidence-backed domain is the default.
-    print("\n=== CASE 2: supplied domain != resolved -> flagged, not auto-fixed ===")
+    # The typed domain stands (the search's best match for a small company is wrong
+    # more often than a typed domain is); the difference is shown beside it.
+    print("\n=== CASE 2: supplied domain != resolved -> kept, difference shown ===")
     o2 = organic(
         ("Widgetize | Home", G, "https://www.widgetize.com"),
         ("Widgetize | Facebook", G, "https://www.facebook.com/Widgetize"),
     )
     e2 = resolve_competitor("widgetise.com", o2)   # user typed the WRONG domain
     check("C2 agreement is mismatch", e2["domain"]["agreement"], "mismatch")
-    truthy("C2 mismatch is flagged", any("MISMATCH" in f or "mismatch" in f for f in e2["flags"]))
-    check("C2 default uses evidence-backed resolved domain", e2["domain"]["use"], "widgetize.com")
+    truthy("C2 no warning flag: the typed domain is what will be searched",
+           not any("mismatch" in f for f in e2["flags"]))
+    check("C2 the typed domain is used", e2["domain"]["use"], "widgetise.com")
+    check("C2 the search's best match is kept for the human", e2["domain"]["resolved"], "widgetize.com")
     check("C2 supplied value preserved for the human", e2["domain"]["supplied"], "widgetise.com")
 
     # --- CASE 3: supplied domain MATCHES -> clean, no flag ----------------
@@ -1591,16 +2584,16 @@ if __name__ == "__main__":
               "https://www.facebook.com/AcmePlumbing")
         check("C9 name->full LinkedIn name", entries[0]["linkedin"]["use"],
               "Acme Plumbing Drain Service")
-        # Supplied domain best-drains.com vs resolved bestdrains.com is a REAL mismatch
-        # (a hyphen difference) — surfaced, never auto-corrected.
+        # Supplied domain best-drains.com vs resolved bestdrains.com is a REAL difference
+        # (a hyphen) — surfaced beside the typed domain, never auto-corrected.
         check("C9 supplied-domain hyphen mismatch flagged",
               entries[1]["domain"]["agreement"], "mismatch")
 
         comp = write_resolution(entries, _wd)
         wrote_domains = json.loads((comp / "domains.json").read_text())
         wrote_res = json.loads((comp / "resolution.json").read_text())
-        check("C9 domains.json = chosen use-domains", wrote_domains,
-              ["acmeplumbing.com", "bestdrains.com"])
+        check("C9 domains.json = chosen use-domains (the typed hyphenated domain stands)",
+              wrote_domains, ["acmeplumbing.com", "best-drains.com"])
         check("C9 resolution.json has both entries", len(wrote_res), 2)
 
         # Unmatched identity: a query with no B1 record resolves to all-empty+flagged,
@@ -1670,8 +2663,25 @@ if __name__ == "__main__":
     # --- report smoke -----------------------------------------------------
     print("\n=== report renders ===")
     rep = format_resolution_report([e1, e2, e5])
-    truthy("report shows MISMATCH warning", "MISMATCH" in rep)
+    truthy("report says the search found another site and the typed one is used",
+           "the search's best match was widgetize.com; the website you gave (widgetise.com) is used"
+           in rep)
+    truthy("report shows no MISMATCH warning for a typed domain that is in use", "MISMATCH" not in rep)
     truthy("report shows a resolved domain", "brandco.com" in rep)
+    e2_edited = json.loads(json.dumps(e2))
+    e2_edited["domain"]["use"] = "widgetize.com"      # the user changed `use` by hand
+    rep2 = format_resolution_report([e2_edited])
+    truthy("an edited `use` that differs from the typed domain is warned about",
+           "MISMATCH" in rep2 and "you gave 'widgetise.com' but the Google search will use "
+           "'widgetize.com'" in rep2)
+    e2_back = json.loads(json.dumps(e2_edited))
+    e2_back["domain"]["use"] = "widgetise.com"        # ... and changed it back
+    e2_back["flags"] = ["domain mismatch: supplied 'widgetise.com' != resolved 'widgetize.com'"
+                        ". Confirm the real advertiser domain before the Google scrape"]
+    truthy("after `use` is set back to the typed domain no mismatch is printed, "
+           "even beside a stored mismatch flag",
+           "MISMATCH" not in format_resolution_report([e2_back])
+           and "domain mismatch" not in format_resolution_report([e2_back]))
 
     # --- CASE 12: check_resolution_match ----------------------------------
     print("\n=== CASE 12: check_resolution_match ===")
@@ -1860,7 +2870,7 @@ if __name__ == "__main__":
     ents = [{"input": "Revolut", "kind": "name", "domain": {"use": "revolut.com"}},
             {"input": "hubspot.com", "kind": "domain", "domain": {"use": "hubspot.com"}},
             {"input": "basecamp.com", "kind": "domain", "domain": {"use": "basecamp.com"}},
-            {"input": "bestdrains.com", "kind": "domain", "domain": {"use": "bestdrains.com"}}]
+            {"input": "Best Drains", "kind": "name", "domain": {"use": "bestdrains.com"}}]
     v17 = google_ad_owners(g, ents)
     check("C17 verdicts", v17, ["own"] * 3 + ["other"] + ["own"] * 2
           + ["other", "other", "other", "own", "own", "other", "unnamed"])
@@ -1878,9 +2888,73 @@ if __name__ == "__main__":
     truthy("C17 no line for a website with nothing set aside",
            not any("bestdrains.com" in s for s in l17))
     truthy("C17 no em-dash in the lines", not any("—" in s for s in l17))
+    # A website typed alone: a label of two or more words ("bestdrains") also starts a trading
+    # name, so the DBA name counts; a one-word label ("hubspot") is only the WHOLE name, so a
+    # partner agency is another advertiser.
+    check("C17 a website typed alone: a two-word label counts a DBA trading name",
+          google_ad_owners(g, ents[:3] + [{"input": "bestdrains.com", "kind": "domain",
+                                           "domain": {"use": "bestdrains.com"}}])[9:11],
+          ["own", "own"])
+    check("C17 a website typed alone: a one-word label does not claim a partner agency",
+          google_ad_owners([gad("hubspot.com", "HubSpot Partner Agency X", "AR9")], ents[:2]), ["other"])
     ents[2]["domain"]["google_advertisers"] = ["37signals LLC"]
     check("C17 a name the user lists counts as the competitor's",
-          google_ad_owners(g, ents)[9], "own")
+          google_ad_owners(g, ents)[8], "own")
+
+    # --- CASE 18: a company given as "Name (website)" is ONE competitor whose name
+    # drives every lookup, while the typed website drives Google. ----------------
+    print("\n=== CASE 18: Name (website) pairs ===")
+    _pc = {"competitor_names": ["Acme Strategy Advisors (acmesa.com)", "Acme (UK) Ltd",
+                                "Best Drains (Chicago)"],
+           "competitor_domains": ["acmesa.com"]}
+    check("C18 explicit pair: one identity (the name), its website supplied; ordinary "
+          "brackets stay names; the same website in the domains list is not a second competitor",
+          pair_competitors(_pc),
+          [("Acme Strategy Advisors", "acmesa.com"), ("Acme (UK) Ltd", ""), ("Best Drains (Chicago)", "")])
+    check("C18 old configs: a name and a domain that spell alike still pair",
+          pair_competitors({"competitor_names": ["Acme Plumbing"], "competitor_domains": ["acmeplumbing.com"]}),
+          [("Acme Plumbing", "acmeplumbing.com")])
+    o18 = organic(
+        ("Acme Strategy Advisors", G, "https://www.jobsboard.com"),
+        ("Acme Strategy Advisors | acmesa.com", G, "https://www.acmesa.com"),
+        ("Acmesa.com (@acmesaofficial) - Mentions", G, "https://www.facebook.com/acmesaofficial"),
+        ("Acme Strategy Advisors | LinkedIn", G, "https://www.linkedin.com/company/acme-strategy"))
+    e18 = resolve_competitor("Acme Strategy Advisors", o18, "acmesa.com")
+    check("C18 the typed website is used even when a third-party site ranks first",
+          (e18["domain"]["use"], e18["domain"]["resolved"]), ("acmesa.com", "jobsboard.com"))
+    check("C18 the page named by the website in full is used",
+          e18["facebook"]["use"], "https://www.facebook.com/acmesaofficial")
+    check("C18 the LinkedIn company is found by the name", e18["linkedin"]["use"], "Acme Strategy Advisors")
+
+    # --- CASE 19: what a bracket may hold; social addresses; a changed website ---
+    print("\n=== CASE 19: bracket rules, social addresses, changed website ===")
+    check("C19 .co.uk, an all-capitals .COM and a full URL are websites",
+          [split_name_and_site(f"Acme ({t})")[1] for t in ("acme.co.uk", "ACME.COM", "https://Acme.io/x")],
+          ["acme.co.uk", "acme.com", "acme.io"])
+    check("C20 a real ending outside the old short list is a website (acme.shop)",
+          split_name_and_site("Acme Plumbing (acme.shop)"), ("Acme Plumbing", "acme.shop"))
+    check("C20 a mixed-case dotted word is a name, not a website (Ltd.co, Inc.Co, Co.uk)",
+          [parse_competitor_entry(f"Acme Holdings ({t})")[1] for t in ("Ltd.co", "Inc.Co", "Co.uk")],
+          ["", "", ""])
+    check("C20 platform aliases and shorteners are not websites",
+          [parse_competitor_entry(f"Acme ({t})")[1] for t in
+           ("fb.com", "instagr.am", "lnkd.in", "youtu.be", "google.co.uk", "bit.ly", "linktr.ee")],
+          [""] * 7)
+    check("C20 the label left of the public ending is the name part, never a subdomain",
+          [_registrable_label(d) for d in ("shop.abc.de", "app.hey.io", "go.ab.co", "bbc.co.uk", "acme.com.au")],
+          ["abc", "hey", "ab", "bbc", "acme"])
+    check("C19 Pty.Ltd, St.Louis and v2.0 are not: the entry stays as written, with a notice",
+          [(parse_competitor_entry(f"Acme ({t})")[:2], bool(parse_competitor_entry(f"Acme ({t})")[2]))
+           for t in ("Pty.Ltd", "St.Louis", "v2.0")],
+          [((f"Acme ({t})", ""), True) for t in ("Pty.Ltd", "St.Louis", "v2.0")])
+    check("C19 a Facebook address in the bracket leaves the plain name",
+          parse_competitor_entry("Acme (facebook.com/acme)")[:2], ("Acme", ""))
+    check("C19 a social address typed as a competitor is skipped, not searched",
+          pair_competitors({"competitor_domains": ["facebook.com", "bestdrains.com"]}),
+          [("bestdrains.com", "")])
+    check("C19 a changed typed website is a mismatch",
+          check_resolution_match(["Acme"], [{"input": "Acme", "domain": {"supplied": "a.com"}}],
+                                 {"Acme": "b.com"})["match"], False)
 
     print(f"\n{'='*50}\nResults: {PASS} passed, {FAIL} failed")
     if FAIL:
